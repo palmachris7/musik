@@ -68,10 +68,17 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
             p
         }),
     };
+    dlog!(
+        "picker proto={:?} font={:?} mode={}",
+        picker.protocol_type(),
+        picker.font_size(),
+        if cover_mode == CoverMode::Halfblocks { "halfblocks" } else { "foto" }
+    );
     let mut cover_img: Option<(String, DynamicImage)> = None; // (key, imagen)
     let mut cover_proto: Option<StatefulProtocol> = None; // render del área
     let mut cover_key = String::new(); // key de la carátula MOSTRADA
     let mut cover_fresh = false; // true si lo mostrado viene del stream de este track
+    let mut last_cover_rect: Option<Rect> = None; // para loguear cambios
     // Arte pendiente: el diff de artwork suele llegar ms después del cambio.
     // Se espera (tope 800ms) en vez de disparar `get` que puede traer lo viejo.
     let mut pending_art = false;
@@ -390,6 +397,10 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                 return;
             }
             if let Some(cr) = cover_r {
+                if last_cover_rect != Some(cr) {
+                    dlog!("cover rect {:?} img={}", cr, cover_img.as_ref().map(|(_, img)| format!("{}x{}", img.width(), img.height())).unwrap_or_default());
+                    last_cover_rect = Some(cr);
+                }
                 if let Some(proto) = cover_proto.as_mut() {
                     f.render_stateful_widget(StatefulImage::default(), cr, proto);
                 }
