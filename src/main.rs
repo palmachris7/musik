@@ -23,7 +23,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Gauge, Paragraph},
+    widgets::Paragraph,
 };
 use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
 
@@ -371,6 +371,32 @@ impl Now {
 }
 
 // ---- helpers idénticos a Go ----
+
+fn progress_bar(pos: f64, dur: f64, width: usize) -> (String, String, String, usize) {
+    // Devuelve (barra, left, right, gap): el look probado de main.
+    if dur <= 0.0 {
+        return (String::new(), String::new(), String::new(), 1);
+    }
+    let mut ratio = pos / dur;
+    if ratio < 0.0 {
+        ratio = 0.0;
+    }
+    if ratio > 1.0 {
+        ratio = 1.0;
+    }
+    let fill = (ratio * width as f64) as usize;
+    let bar = format!("  {}{}●{}", "━".repeat(fill), "", "─".repeat(width - fill));
+    let mut remain = dur - pos;
+    if remain < 0.0 {
+        remain = 0.0;
+    }
+    let (left, right) = (fmt_time(pos), format!("-{}", fmt_time(remain)));
+    let mut gap = (2 + width as i64 + 1) - (2 + char_count(&left) as i64) - char_count(&right) as i64;
+    if gap < 1 {
+        gap = 1;
+    }
+    (bar, left, right, gap as usize)
+}
 
 fn fmt_time(s: f64) -> String {
     let m = (s as i64) / 60;
@@ -968,8 +994,13 @@ fn main() -> io::Result<()> {
     let mut play_hold: Option<Instant> = None;
     // Rama exp: carátula foto (ratatui-image, protocolo auto) en vez de chafa.
     // Picker una vez al arranque (pregunta al terminal, con fallback).
-    let picker = Picker::from_query_stdio()
-        .unwrap_or_else(|_| Picker::from_fontsize((8, 16)));
+    // Sin gráficos (sin respuesta al query): halfblocks explícito, nunca
+    // kitty a ciegas (pinta basura en terminales sin soporte).
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| {
+        let mut p = Picker::from_fontsize((8, 16));
+        p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+        p
+    });
     let mut cover_img: Option<(String, DynamicImage)> = None; // (key, imagen)
     let mut cover_proto: Option<StatefulProtocol> = None; // render del área
     let mut cover_key = String::new(); // key de la carátula MOSTRADA
@@ -1278,32 +1309,26 @@ fn main() -> io::Result<()> {
                 rows[r_meta],
             );
             if let (Some(gi), Some(ti)) = (r_gauge, r_times) {
-                let mut ratio = state.position() / state.duration;
-                ratio = ratio.clamp(0.0, 1.0);
+                // Barra clásica ━━●── (el Gauge gordo no va con este look).
+                let (bar, left, right, gap) = progress_bar(state.position(), state.duration, cw_w - 1);
+                f.render_widget(Paragraph::new(bar), rows[gi]);
                 f.render_widget(
-                    Gauge::default()
-                        .ratio(ratio)
-                        .gauge_style(Style::default())
-                        .use_unicode(true),
-                    rows[gi],
-                );
-                let left = fmt_time(state.position());
-                let mut remain = state.duration - state.position();
-                if remain < 0.0 {
-                    remain = 0.0;
-                }
-                let right = format!("-{}", fmt_time(remain));
-                f.render_widget(
-                    Paragraph::new(format!("{}  {}", left, right))
-                        .alignment(Alignment::Center)
-                        .style(dim_style()),
+                    Paragraph::new(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(left, dim_style()),
+                        Span::raw(" ".repeat(gap)),
+                        Span::styled(right, dim_style()),
+                    ])),
                     rows[ti],
                 );
             }
             let (icons, keys) = control_icons(&state);
             let dim = dim_style();
             let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
-            for (i, cell) in ctrl_cells.iter().enumerate() {
+            // Controles compactos con slots (el look probado), no Fill total.
+            let slot = cw_w / 5;
+            let mut top_spans: Vec<Span> = vec![Span::raw("  ")];
+            for (i, ic) in icons.iter().enumerate() {
                 let mut st = Style::default();
                 if i == 0 {
                     st = if state.shuffle { bold } else { dim };
@@ -1314,17 +1339,30 @@ fn main() -> io::Result<()> {
                         dim
                     };
                 }
-                f.render_widget(
-                    Paragraph::new(icons[i].clone()).alignment(Alignment::Center).style(st),
-                    *cell,
-                );
+                let padn = slot.saturating_sub(1);
+                let (l, r) = match i {
+                    0 => (0, padn),
+                    4 => (padn, 0),
+                    _ => (padn / 2, padn - padn / 2),
+                };
+                top_spans.push(Span::raw(" ".repeat(l)));
+                top_spans.push(Span::styled(ic.clone(), st));
+                top_spans.push(Span::raw(" ".repeat(r)));
             }
-            for (i, cell) in keys_cells.iter().enumerate() {
-                f.render_widget(
-                    Paragraph::new(keys[i].clone()).alignment(Alignment::Center).style(dim),
-                    *cell,
-                );
+            f.render_widget(Paragraph::new(Line::from(top_spans)), rows[r_ctrl]);
+            let mut bot_spans: Vec<Span> = vec![Span::raw("  ")];
+            for (i, k) in keys.iter().enumerate() {
+                let padn = slot.saturating_sub(1);
+                let (l, r) = match i {
+                    0 => (0, padn),
+                    4 => (padn, 0),
+                    _ => (padn / 2, padn - padn / 2),
+                };
+                bot_spans.push(Span::raw(" ".repeat(l)));
+                bot_spans.push(Span::styled(k.clone(), dim));
+                bot_spans.push(Span::raw(" ".repeat(r)));
             }
+            f.render_widget(Paragraph::new(Line::from(bot_spans)), rows[r_keys]);
             if let Some(lr) = lyr_rect {
                 f.render_widget(Paragraph::new(ll.clone()), lr);
             }
