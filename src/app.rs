@@ -29,7 +29,7 @@ pub(crate) enum CoverMode {
     Halfblocks,
 }
 
-pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
+pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -53,20 +53,34 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
     // Tras un toggle del usuario se confía en local 1.5s: el remoto (stream
     // en fade o poll viejo) no puede devolver el icono. Sin esto se ve lag.
     let mut play_hold: Option<Instant> = None;
-    // Rama exp: dos formas de cover. `foto` = protocolo auto (kitty/sixel
-    // donde hay, halfblocks si no). `halfblocks` = celdas de texto siempre:
-    // layout 100% medible, cero overlay posible.
+    // Rama exp: dos formas de cover. `foto` (auto) o `halfblocks` (texto).
+    // Escala HiDPI: en Retina la fuente reportada viene en puntos y los
+    // píxeles reales son 2x; sin escalar, la foto sale a mitad anclada
+    // arriba-izquierda.
     let picker = match cover_mode {
         CoverMode::Halfblocks => {
             let mut p = Picker::from_fontsize((8, 16));
             p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
             p
         }
-        CoverMode::Foto => Picker::from_query_stdio().unwrap_or_else(|_| {
-            let mut p = Picker::from_fontsize((8, 16));
-            p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
-            p
-        }),
+        CoverMode::Foto => match Picker::from_query_stdio() {
+            Ok(p) => {
+                let (fw, fh) = p.font_size();
+                let proto = p.protocol_type();
+                let scaled = (
+                    (fw.max(1) as f64 * hidpi).round() as u16,
+                    (fh.max(1) as f64 * hidpi).round() as u16,
+                );
+                let mut np = Picker::from_fontsize((scaled.0.max(1), scaled.1.max(1)));
+                np.set_protocol_type(proto);
+                np
+            }
+            Err(_) => {
+                let mut p = Picker::from_fontsize((8, 16));
+                p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+                p
+            }
+        },
     };
     dlog!(
         "picker proto={:?} font={:?} mode={}",

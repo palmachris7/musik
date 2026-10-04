@@ -22,7 +22,7 @@ use crate::media::mc_control;
 
 fn print_usage() {
     eprintln!("musik — Apple Music en tu terminal (q sale)");
-    eprintln!("  musik [--cover foto|halfblocks]   TUI");
+    eprintln!("  musik [--cover foto|halfblocks] [--hidpi N]   TUI");
     eprintln!("  musik play | pause | toggle | next | prev | version");
 }
 
@@ -39,9 +39,29 @@ fn main() -> io::Result<()> {
     if args.iter().any(|a| a == "--cover=halfblocks") {
         cover_mode = crate::app::CoverMode::Halfblocks;
     }
-    if let Some(cmd) = args.iter().find(|a| {
-        !a.starts_with('-') && *a != "viuer" && *a != "halfblocks" && *a != "foto"
-    }) {
+    // Escala HiDPI para la foto (Retina = puntos vs píxeles). Default 2.0
+    // en macOS-arm64 (todo Retina), 1.0 resto. Override: --hidpi 1.
+    let mut hidpi = if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        2.0
+    } else {
+        1.0
+    };
+    for w in args.windows(2) {
+        if w[0] == "--hidpi" {
+            if let Ok(n) = w[1].parse::<f64>() {
+                if n > 0.0 && n <= 4.0 {
+                    hidpi = n;
+                }
+            }
+        }
+    }
+    let is_flag_value = |a: &String| {
+        *a == "viuer"
+            || *a == "halfblocks"
+            || *a == "foto"
+            || a.parse::<f64>().is_ok()
+    };
+    if let Some(cmd) = args.iter().find(|a| !a.starts_with('-') && !is_flag_value(a)) {
         match cmd.as_str() {
             "version" | "--version" | "-v" => {
                 println!("musik {}", env!("CARGO_PKG_VERSION"));
@@ -58,5 +78,5 @@ fn main() -> io::Result<()> {
             }
         }
     }
-    crate::app::run(cover_mode)
+    crate::app::run(cover_mode, hidpi)
 }
