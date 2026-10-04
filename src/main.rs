@@ -22,7 +22,7 @@ use crate::media::mc_control;
 
 fn print_usage() {
     eprintln!("musik — Apple Music en tu terminal (q sale)");
-    eprintln!("  musik [--cover foto|halfblocks] [--hidpi N]   TUI");
+    eprintln!("  musik [--cover foto|halfblocks]   TUI");
     eprintln!("  musik play | pause | toggle | next | prev | version");
 }
 
@@ -39,24 +39,7 @@ fn main() -> io::Result<()> {
     if args.iter().any(|a| a == "--cover=halfblocks") {
         cover_mode = crate::app::CoverMode::Halfblocks;
     }
-    // Escala HiDPI para la foto (Retina = puntos vs píxeles).
-    // Default 1.0 (lo probado); override manual con --hidpi 2.
-    let mut hidpi = 1.0;
-    for w in args.windows(2) {
-        if w[0] == "--hidpi" {
-            if let Ok(n) = w[1].parse::<f64>() {
-                if n > 0.0 && n <= 4.0 {
-                    hidpi = n;
-                }
-            }
-        }
-    }
-    let is_flag_value = |a: &String| {
-        *a == "viuer"
-            || *a == "halfblocks"
-            || *a == "foto"
-            || a.parse::<f64>().is_ok()
-    };
+    let is_flag_value = |a: &String| *a == "viuer" || *a == "halfblocks" || *a == "foto";
     if let Some(cmd) = args.iter().find(|a| !a.starts_with('-') && !is_flag_value(a)) {
         match cmd.as_str() {
             "version" | "--version" | "-v" => {
@@ -74,5 +57,5 @@ fn main() -> io::Result<()> {
             }
         }
     }
-    crate::app::run(cover_mode, hidpi)
+    crate::app::run(cover_mode)
 }
