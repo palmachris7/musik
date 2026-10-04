@@ -23,7 +23,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Gauge, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Gauge, Paragraph},
 };
 use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
 
@@ -1325,15 +1325,8 @@ fn main() -> io::Result<()> {
                     *cell,
                 );
             }
-            if let Some(li) = r_lyr {
-                f.render_widget(Paragraph::new(ll.clone()), rows[li]);
-                let cur = lyric_current(&lyrics, state.position()).max(0) as usize;
-                let mut sb = ScrollbarState::new(lyrics.len().max(1)).position(cur);
-                f.render_stateful_widget(
-                    Scrollbar::new(ScrollbarOrientation::VerticalRight),
-                    rows[li],
-                    &mut sb,
-                );
+            if let Some(lr) = lyr_rect {
+                f.render_widget(Paragraph::new(ll.clone()), lr);
             }
         })?;
 
