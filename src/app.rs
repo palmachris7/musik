@@ -23,7 +23,13 @@ use crate::media::*;
 use crate::state::*;
 use crate::view::*;
 
-pub(crate) fn run() -> io::Result<()> {
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum CoverMode {
+    Foto,
+    Halfblocks,
+}
+
+pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -47,15 +53,21 @@ pub(crate) fn run() -> io::Result<()> {
     // Tras un toggle del usuario se confía en local 1.5s: el remoto (stream
     // en fade o poll viejo) no puede devolver el icono. Sin esto se ve lag.
     let mut play_hold: Option<Instant> = None;
-    // Rama exp: carátula foto (ratatui-image, protocolo auto) en vez de chafa.
-    // Picker una vez al arranque (pregunta al terminal, con fallback).
-    // Sin gráficos (sin respuesta al query): halfblocks explícito, nunca
-    // kitty a ciegas (pinta basura en terminales sin soporte).
-    let picker = Picker::from_query_stdio().unwrap_or_else(|_| {
-        let mut p = Picker::from_fontsize((8, 16));
-        p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
-        p
-    });
+    // Rama exp: dos formas de cover. `foto` = protocolo auto (kitty/sixel
+    // donde hay, halfblocks si no). `halfblocks` = celdas de texto siempre:
+    // layout 100% medible, cero overlay posible.
+    let picker = match cover_mode {
+        CoverMode::Halfblocks => {
+            let mut p = Picker::from_fontsize((8, 16));
+            p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+            p
+        }
+        CoverMode::Foto => Picker::from_query_stdio().unwrap_or_else(|_| {
+            let mut p = Picker::from_fontsize((8, 16));
+            p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+            p
+        }),
+    };
     let mut cover_img: Option<(String, DynamicImage)> = None; // (key, imagen)
     let mut cover_proto: Option<StatefulProtocol> = None; // render del área
     let mut cover_key = String::new(); // key de la carátula MOSTRADA

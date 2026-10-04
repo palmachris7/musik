@@ -22,14 +22,26 @@ use crate::media::mc_control;
 
 fn print_usage() {
     eprintln!("musik — Apple Music en tu terminal (q sale)");
-    eprintln!("  musik [--cover viuer]   TUI");
+    eprintln!("  musik [--cover foto|halfblocks]   TUI");
     eprintln!("  musik play | pause | toggle | next | prev | version");
 }
 
 fn main() -> io::Result<()> {
     // Subcomandos primero (sin TUI): iguales que music-cli, vía media-control.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(cmd) = args.iter().find(|a| !a.starts_with('-') && *a != "viuer") {
+    // Forma de cover (rama exp): foto (auto) o halfblocks (texto, medible).
+    let mut cover_mode = crate::app::CoverMode::Foto;
+    for w in args.windows(2) {
+        if w[0] == "--cover" && w[1] == "halfblocks" {
+            cover_mode = crate::app::CoverMode::Halfblocks;
+        }
+    }
+    if args.iter().any(|a| a == "--cover=halfblocks") {
+        cover_mode = crate::app::CoverMode::Halfblocks;
+    }
+    if let Some(cmd) = args.iter().find(|a| {
+        !a.starts_with('-') && *a != "viuer" && *a != "halfblocks" && *a != "foto"
+    }) {
         match cmd.as_str() {
             "version" | "--version" | "-v" => {
                 println!("musik {}", env!("CARGO_PKG_VERSION"));
@@ -46,5 +58,5 @@ fn main() -> io::Result<()> {
             }
         }
     }
-    crate::app::run()
+    crate::app::run(cover_mode)
 }
