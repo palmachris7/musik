@@ -16,7 +16,16 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, style::Style, text::Line, widgets::Paragraph};
+use image::DynamicImage;
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Alignment, Constraint, Layout, Rect},
+    style::Style,
+    text::{Line, Span},
+    widgets::{Gauge, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+};
+use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
 
 const COVER_W: usize = 60; // = coverWidth en Go (tui.go + cover.go)
 const LYRIC_ROWS: usize = 9;
@@ -557,45 +566,13 @@ fn cover_rows(term_h: usize) -> usize {
     h
 }
 
-fn show_cover(cover: &str, term_h: usize) -> bool {
-    if cover.is_empty() {
+fn show_cover(has_cover: bool, term_h: usize) -> bool {
+    if !has_cover {
         return false;
     }
     !(term_h > 0 && term_h < 20) // mismo gate que Go: tiny esconde cover
 }
 
-fn render_cover(path: &str, width: usize, max_rows: usize) -> String {
-    let size = if max_rows > 0 {
-        format!("{}x{}", width, max_rows)
-    } else {
-        format!("{}", width)
-    };
-    let out = Command::new("chafa")
-        .args([
-            "--format", "symbols",
-            "--symbols", "block",
-            "--dither", "diffusion",
-            // Sin probe de terminal: evita los 5s de espera OSC cuando el
-            // terminal no responde; píxeles idénticos (verificado byte a byte).
-            "--probe", "off",
-            "--size", &size,
-            path,
-        ])
-        .output();
-    let out = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return String::new(),
-    };
-    let mut art = out.trim_end().to_string();
-    if art.is_empty() {
-        return String::new();
-    }
-    art = art.replace("\x1b[?25l", "").replace("\x1b[?25h", "");
-    art.lines()
-        .map(|l| format!("  {}", l))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 
 // Artwork del `get` completo (con carátula). Solo lo llama el worker de
 // carátula cuando el stream no trajo artworkData.
@@ -624,7 +601,7 @@ struct StreamUpdate {
 
 enum BgMsg {
     Update(StreamUpdate),
-    CoverReady { key: String, text: String, w: usize, h: usize, fresh: bool },
+    CoverReady { key: String, img: image::DynamicImage, fresh: bool },
     LyricsReady { key: String, items: Vec<Lyric> },
     MetaReady { key: String, fav: bool, shuffle: bool, repeat: String },
     StreamAlive,
@@ -634,46 +611,11 @@ enum BgMsg {
 struct ArtJob {
     key: String,
     b64: Option<String>, // None => el worker hace `get` (lento, en background)
-    w: usize,
-    h: usize,
-    viuer: bool, // experimental: half-blocks en vez de chafa
 }
 
 // Experimental --cover viuer: la técnica de viuer (half-block inferior ▄,
 // fg=píxel abajo bg=píxel arriba, resize con image) en vez de chafa.
 // Mismo marco (indent 2, ANSI) para comparar el LOOK 1:1.
-fn render_halfblocks(path: &str, width: usize, max_rows: usize) -> String {
-    if width == 0 || max_rows == 0 {
-        return String::new();
-    }
-    let rgb = match image::open(path) {
-        Ok(i) => i.to_rgb8(),
-        Err(_) => return String::new(),
-    };
-    let thumb = image::imageops::resize(
-        &rgb,
-        width as u32,
-        (max_rows * 2).max(2) as u32,
-        image::imageops::FilterType::Triangle,
-    );
-    let mut out = String::new();
-    for y in 0..max_rows {
-        out.push_str("  ");
-        for x in 0..width {
-            let t = thumb.get_pixel(x as u32, (y * 2) as u32);
-            let b = thumb.get_pixel(x as u32, (y * 2 + 1) as u32);
-            out.push_str(&format!(
-                "\x1b[38;2;{};{};{};48;2;{};{};{}m▄",
-                b[0], b[1], b[2], t[0], t[1], t[2]
-            ));
-        }
-        out.push_str("\x1b[0m");
-        if y + 1 < max_rows {
-            out.push('\n');
-        }
-    }
-    out
-}
 
 // (fetch de letras: hilos sueltos por track, ver spawn_lyr_fetch)
 
@@ -803,6 +745,9 @@ fn spawn_stream(tx: Sender<BgMsg>) {
 
 // Worker carátula: decode + chafa fuera del hilo UI. Latest-wins en resize.
 // Caché del render por (track,w,h): tu Go re-horquilla chafa en cada resize.
+// Worker carátula (rama exp): decode a DynamicImage fuera del hilo UI.
+// El widget (StatefulImage) adapta tamaño solo en el render: sin chafa,
+// sin caché en disco, sin re-render en resize.
 fn spawn_cover_worker(rx: Receiver<ArtJob>, tx: Sender<BgMsg>) {
     thread::spawn(move || {
         while let Ok(mut job) = rx.recv() {
@@ -822,61 +767,18 @@ fn spawn_cover_worker(rx: Receiver<ArtJob>, tx: Sender<BgMsg>) {
                     }
                 }
             };
-            dlog!("cover job {}: b64 ok ({}B)", job.key.replace('\0', "|"), b64.len());
-            // Clave con hash del CONTENIDO: si el `get` ganó la carrera con el
-            // artwork viejo, no envenena la caché del track nuevo.
-            let cdir = if job.viuer { "cover-viuer" } else { "cover" };
-            let cname = format!(
-                "{}_{}_{}x{}.ans",
-                hash_key(&[&job.key]),
-                hash_key(&[b64.as_str()]),
-                job.w,
-                job.h
-            );
-            if let Some(p) = cache_file(cdir, &cname) {
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    if !text.is_empty() {
-                        let _ = tx.send(BgMsg::CoverReady { key: job.key, text, w: job.w, h: job.h, fresh: had_b64 });
-                        continue;
-                    }
-                }
-            }
             let t0 = Instant::now();
             let raw =
                 match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64) {
                     Ok(r) if !r.is_empty() => r,
                     _ => continue,
                 };
-            dlog!("cover job: decode {}ms", t0.elapsed().as_millis());
-            let path = std::env::temp_dir().join("musik-cover.jpg");
-            if std::fs::write(&path, &raw).is_err() {
-                continue;
-            }
-            dlog!("cover job: write {}ms", t0.elapsed().as_millis());
-            let ps = path.to_string_lossy().to_string();
-            let t0 = Instant::now();
-            let probe = Command::new("true").output();
-            dlog!("cover job: spawn-true {}ms ok={}", t0.elapsed().as_millis(), probe.is_ok());
-            let t0 = Instant::now();
-            let text = if job.viuer {
-                render_halfblocks(&ps, job.w, job.h)
-            } else {
-                render_cover(&ps, job.w, job.h)
+            let img = match image::load_from_memory(&raw) {
+                Ok(i) => i,
+                Err(_) => continue,
             };
-            dlog!("cover job {}: render {}ms size={}x{} viuer={}", job.key.replace('\0', "|"), t0.elapsed().as_millis(), job.w, job.h, job.viuer);
-            if text.is_empty() {
-                continue;
-            }
-            if let Some(p) = cache_file(cdir, &cname) {
-                let _ = std::fs::write(&p, &text);
-            }
-            let _ = tx.send(BgMsg::CoverReady {
-                key: job.key,
-                text,
-                w: job.w,
-                h: job.h,
-                fresh: had_b64,
-            });
+            dlog!("cover job {}: decode {}ms", job.key.replace('\0', "|"), t0.elapsed().as_millis());
+            let _ = tx.send(BgMsg::CoverReady { key: job.key, img, fresh: had_b64 });
         }
     });
 }
@@ -961,51 +863,6 @@ fn fetch_now() -> Option<Now> {
 
 // ---- render: mismas líneas que Go nowLines() ----
 
-fn progress_bar(pos: f64, dur: f64, width: usize) -> Vec<String> {
-    if dur <= 0.0 {
-        return vec![];
-    }
-    let mut ratio = pos / dur;
-    if ratio < 0.0 {
-        ratio = 0.0;
-    }
-    if ratio > 1.0 {
-        ratio = 1.0;
-    }
-    let fill = (ratio * width as f64) as usize;
-    let bar = format!("  {}{}●{}", "━".repeat(fill), "", "─".repeat(width - fill));
-    let mut remain = dur - pos;
-    if remain < 0.0 {
-        remain = 0.0;
-    }
-    let (left, right) = (fmt_time(pos), format!("-{}", fmt_time(remain)));
-    let mut gap = (2 + width + 1) as i64 - (2 + char_count(&left) as i64) - char_count(&right) as i64;
-    if gap < 1 {
-        gap = 1;
-    }
-    // devolvemos con marcadores: la primera línea normal, la segunda lleva tiempos
-    vec![bar, format!("TIMES:{}|{}|{}", left, gap, right)]
-}
-
-fn control_icons(n: &Now) -> (Vec<String>, Vec<String>) {
-    let play = if n.playing { "⏸" } else { "▶" };
-    let mut rp = "↻".to_string();
-    if n.repeat == "one" {
-        rp = "↻¹".to_string();
-    }
-    let icons = vec![
-        "⇄".to_string(),
-        "⏮".to_string(),
-        play.to_string(),
-        "⏭".to_string(),
-        rp,
-    ];
-    let keys = vec!["s", "p", "␣", "n", "r"]
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect();
-    (icons, keys)
-}
 
 fn center_text(s: &str, w: usize) -> String {
     let r = s.chars().count();
@@ -1037,123 +894,28 @@ fn lyric_lines(lyrics: &[Lyric], pos: f64, playing: bool, w: usize, term_h: usiz
     out
 }
 
-fn now_lines(n: &Now, term_w: usize, term_h: usize, cover: &str) -> Vec<Line<'static>> {
-    let w = cw(term_w);
-    let now = Instant::now();
-    let since = n.track_since.unwrap_or(now);
-    if n.title.is_empty() {
-        return vec![Line::from(vec![ratatui::text::Span::styled(
-            "  waiting for the Music app… play something ♪",
-            dim_style(),
-        )])];
+fn control_icons(n: &Now) -> (Vec<String>, Vec<String>) {
+    let play = if n.playing { "⏸" } else { "▶" };
+    let mut rp = "↻".to_string();
+    if n.repeat == "one" {
+        rp = "↻¹".to_string();
     }
-    let mut out: Vec<Line> = vec![];
-    if show_cover(cover, term_h) {
-        // chafa sale con ANSI: convertir a spans (igual color que Go, que imprime crudo)
-        use ansi_to_tui::IntoText;
-        if let Ok(txt) = cover.into_text() {
-            for l in txt.lines {
-                // Igual que Go coverLines: la línea ya trae su indent de 2
-                // (renderCover) y vw lo incluye; solo se suma (w-vw)/2.
-                // Si no entra (vw >= w), se deja tal cual, sin nada extra.
-                let vw = l.width() as usize;
-                if vw > 0 && vw < w {
-                    let mut spans = vec![ratatui::text::Span::raw(" ".repeat((w - vw) / 2))];
-                    spans.extend(l.spans);
-                    out.push(Line::from(spans));
-                } else {
-                    out.push(Line::from(l.spans));
-                }
-            }
-            out.push(Line::raw(""));
-        }
-    }
-    let title_text = format!("  {}", marquee(&n.title, w, now, since));
-    if n.fav {
-        out.push(Line::raw(title_text + " ★"));
-    } else if n.src != "podcast" {
-        // Igual que Go: podcasts sin estrella; music ☆ en dim.
-        out.push(Line::from(vec![
-            ratatui::text::Span::raw(title_text),
-            ratatui::text::Span::styled(
-                " ☆".to_string(),
-                dim_style(),
-            ),
-        ]));
-    } else {
-        out.push(Line::raw(title_text));
-    }
-    out.push(Line::from(vec![ratatui::text::Span::styled(
-        format!("  {}", marquee(&n.meta(), w, now, since)),
-        dim_style(),
-    )]));
-    for b in progress_bar(n.position(), n.duration, w.saturating_sub(1)) {
-        if let Some(rest) = b.strip_prefix("TIMES:") {
-            let parts: Vec<&str> = rest.split('|').collect();
-            let (left, gap, right) = (parts[0], parts[1].parse().unwrap_or(1), parts[2]);
-            // misma geometría que Go: "  left gap right" con tiempos en dim
-            let _ = gap;
-            out.push(Line::from(vec![
-                "  ".into(),
-                ratatui::text::Span::styled(
-                    left.to_string(),
-                    dim_style(),
-                ),
-                ratatui::text::Span::raw(" ".repeat(gap as usize)),
-                ratatui::text::Span::styled(
-                    right.to_string(),
-                    dim_style(),
-                ),
-            ]));
-        } else {
-            out.push(Line::raw(b));
-        }
-    }
-    out.push(Line::raw(""));
-    // controles distribuidos slot=cw/5, primero izq último der (igual que Go)
-    let (icons, keys) = control_icons(n);
-    let slot = w / 5;
-    let dim = dim_style();
-    let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
-    let mut top: Vec<ratatui::text::Span> = vec!["  ".into()];
-    for (i, ic) in icons.iter().enumerate() {
-        let mut st = Style::default();
-        if i == 0 {
-            st = if n.shuffle { bold } else { dim };
-        } else if i == 4 {
-            st = if n.repeat != "" && n.repeat != "off" {
-                bold
-            } else {
-                dim
-            };
-        }
-        // pad aproximado por slot (Go usa lipgloss Width+Align)
-        let pad = slot.saturating_sub(1);
-        let (l, r) = match i {
-            0 => (0, pad),
-            4 => (pad, 0),
-            _ => (pad / 2, pad - pad / 2),
-        };
-        top.push(ratatui::text::Span::raw(" ".repeat(l)));
-        top.push(ratatui::text::Span::styled(ic.clone(), st));
-        top.push(ratatui::text::Span::raw(" ".repeat(r)));
-    }
-    out.push(Line::from(top));
-    let mut bot: Vec<ratatui::text::Span> = vec!["  ".into()];
-    for (i, k) in keys.iter().enumerate() {
-        let pad = slot.saturating_sub(1);
-        let (l, r) = match i {
-            0 => (0, pad),
-            4 => (pad, 0),
-            _ => (pad / 2, pad - pad / 2),
-        };
-        bot.push(ratatui::text::Span::raw(" ".repeat(l)));
-        bot.push(ratatui::text::Span::styled(k.clone(), dim));
-        bot.push(ratatui::text::Span::raw(" ".repeat(r)));
-    }
-    out.push(Line::from(bot));
-    out
+    let icons = vec![
+        "⇄".to_string(),
+        "⏮".to_string(),
+        play.to_string(),
+        "⏭".to_string(),
+        rp,
+    ];
+    let keys = vec!["s", "p", "␣", "n", "r"]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+    (icons, keys)
 }
+
+
+
 
 fn print_usage() {
     eprintln!("musik — Apple Music en tu terminal (q sale)");
@@ -1193,15 +955,6 @@ fn main() -> io::Result<()> {
     let (art_tx, art_rx) = mpsc::channel::<ArtJob>();
     spawn_cover_worker(art_rx, bg_tx.clone());
 
-    // Experimental: --cover viuer usa half-blocks en vez de chafa.
-    // Uso: ./target/debug/musik --cover viuer
-    let cover_viuer = {
-        args.iter().any(|a| a == "--cover=viuer")
-            || args.windows(2).any(|w| w[0] == "--cover" && w[1] == "viuer")
-    };
-    if cover_viuer {
-        eprintln!("musik: cover experimental half-blocks (viuer)");
-    }
 
     let mut state = Now::default();
     let mut last_poll = Instant::now();
@@ -1213,28 +966,27 @@ fn main() -> io::Result<()> {
     // Tras un toggle del usuario se confía en local 1.5s: el remoto (stream
     // en fade o poll viejo) no puede devolver el icono. Sin esto se ve lag.
     let mut play_hold: Option<Instant> = None;
-    let mut cover = String::new();
+    // Rama exp: carátula foto (ratatui-image, protocolo auto) en vez de chafa.
+    // Picker una vez al arranque (pregunta al terminal, con fallback).
+    let picker = Picker::from_query_stdio()
+        .unwrap_or_else(|_| Picker::from_fontsize((8, 16)));
+    let mut cover_img: Option<(String, DynamicImage)> = None; // (key, imagen)
+    let mut cover_proto: Option<StatefulProtocol> = None; // render del área
     let mut cover_key = String::new(); // key de la carátula MOSTRADA
     let mut cover_fresh = false; // true si lo mostrado viene del stream de este track
-    let mut cover_w = 0usize;
-    let mut cover_h = 0usize;
-    let mut art_b64: Option<String> = None;
     // Arte pendiente: el diff de artwork suele llegar ms después del cambio.
     // Se espera (tope 800ms) en vez de disparar `get` que puede traer lo viejo.
     let mut pending_art = false;
     let mut art_deadline: Option<Instant> = None;
     let mut lyrics: Vec<Lyric> = vec![];
     let mut lyrics_on = true;
-    let mut last_size = (0usize, 0usize);
-    let mut size_settled_at: Option<Instant> = None;
 
     // Estado inicial instantáneo (el stream solo manda diffs al cambiar algo).
-    let size0 = term.size().map(|s| (s.width as usize, s.height as usize)).unwrap_or((100, 40));
     if let Some(mut fresh) = fetch_now() {
         fresh.track_since = Some(Instant::now());
         let key = fresh.key();
         state = fresh;
-        let _ = art_tx.send(ArtJob { key: key.clone(), b64: None, w: cw(size0.0), h: cover_rows(size0.1), viuer: cover_viuer });
+        let _ = art_tx.send(ArtJob { key: key.clone(), b64: None });
         spawn_lyr_fetch(key, state.artist.clone(), state.title.clone(), state.album.clone(), state.duration, bg_tx.clone());
     }
 
@@ -1244,19 +996,13 @@ fn main() -> io::Result<()> {
     let request_lyr = |key: &str, st: &Now, tx: &Sender<BgMsg>| {
         spawn_lyr_fetch(key.to_string(), st.artist.clone(), st.title.clone(), st.album.clone(), st.duration, tx.clone());
     };
-    let send_art = |key: &str, b64: &Option<String>, w: usize, h: usize, viuer: bool,
-                    art_tx: &Sender<ArtJob>| {
-        let _ = art_tx.send(ArtJob { key: key.to_string(), b64: b64.clone(), w, h, viuer });
+    let send_art = |key: &str, b64: &Option<String>, art_tx: &Sender<ArtJob>| {
+        let _ = art_tx.send(ArtJob { key: key.to_string(), b64: b64.clone() });
     };
 
     loop {
         let w = term.size()?.width as usize;
         let h = term.size()?.height as usize;
-        if (w, h) != last_size {
-            last_size = (w, h);
-            size_settled_at = Some(Instant::now());
-        }
-
         // Drena eventos background sin bloquear.
         while let Ok(msg) = bg_rx.try_recv() {
             match msg {
@@ -1289,26 +1035,20 @@ fn main() -> io::Result<()> {
                         request_lyr(&key, &state, &bg_tx);
                         if let Some(b) = u.artwork.filter(|s| !s.is_empty()) {
                             // artwork junto al cambio: al instante
-                            art_b64 = Some(b.clone());
                             pending_art = false;
-                            send_art(&key, &Some(b), cw(w), cover_rows(h), cover_viuer, &art_tx);
+                            send_art(&key, &Some(b), &art_tx);
                         } else {
                             // sin artwork aún: espera el diff (llega en ms)
-                            art_b64 = None;
                             pending_art = true;
                             art_deadline = Some(at + Duration::from_millis(800));
                         }
                     } else if let Some(b) = u.artwork {
                         // artwork en diff aparte: el stream fresco siempre gana
                         if !b.is_empty() && !state.title.is_empty() && cover_key != state.key() {
-                            art_b64 = Some(b.clone());
                             pending_art = false;
                             let _ = art_tx.send(ArtJob {
                                 key: state.key(),
                                 b64: Some(b),
-                                w: cw(w),
-                                h: cover_rows(h),
-                                viuer: cover_viuer,
                             });
                         }
                     }
@@ -1319,8 +1059,8 @@ fn main() -> io::Result<()> {
                         play_hold = None;
                     }
                 }
-                BgMsg::CoverReady { key, text, w: rw, h: rh, fresh, .. } => {
-                    dlog!("cover ready {} {}x{} fresh={}", key.replace('\0', "|"), rw, rh, fresh);
+                BgMsg::CoverReady { key, img, fresh } => {
+                    dlog!("cover ready {} fresh={}", key.replace('\0', "|"), fresh);
                     if key != state.key() || state.title.is_empty() {
                         continue; // de otro track: se descarta
                     }
@@ -1333,21 +1073,11 @@ fn main() -> io::Result<()> {
                         }
                         t_cover_logged = true;
                     }
-                    cover = text;
-                    cover_key = key.clone();
+                    // El protocolo se adapta solo al área: sin re-renders.
+                    cover_proto = Some(picker.new_resize_protocol(img.clone()));
+                    cover_img = Some((key.clone(), img));
+                    cover_key = key;
                     cover_fresh = fresh;
-                    cover_w = rw;
-                    cover_h = rh;
-                    // Si se redimensionó durante el render, pide de nuevo.
-                    if cover_w != cw(w) || cover_h != cover_rows(h) {
-                        let _ = art_tx.send(ArtJob {
-                            key,
-                            b64: art_b64.clone(),
-                            w: cw(w),
-                            h: cover_rows(h),
-                            viuer: cover_viuer,
-                        });
-                    }
                 }
                 BgMsg::LyricsReady { key, items } => {
                     if key == state.key() {
@@ -1397,7 +1127,6 @@ fn main() -> io::Result<()> {
                     state.fav = false;
                     cover_fresh = false;
                     request_lyr(&key, &state, &bg_tx);
-                    art_b64 = None;
                     pending_art = true;
                     art_deadline = Some(Instant::now() + Duration::from_millis(800));
                 }
@@ -1407,79 +1136,205 @@ fn main() -> io::Result<()> {
         }
 
         // Tope de espera del diff de artwork: fallback `get` una sola vez.
+        // Resize: nada que hacer, el protocolo se adapta solo al área.
         if pending_art {
             if let Some(dl) = art_deadline {
                 if Instant::now() >= dl {
                     pending_art = false;
                     if !state.title.is_empty() {
                         dlog!("art timeout, fallback get");
-                        let _ = art_tx.send(ArtJob {
-                            key: state.key(),
-                            b64: None,
-                            w: cw(w),
-                            h: cover_rows(h),
-                            viuer: cover_viuer,
-                        });
+                        let _ = art_tx.send(ArtJob { key: state.key(), b64: None });
                     }
                 }
             } else {
                 pending_art = false;
             }
         }
-
-        // Resize con debounce: un solo re-render 300ms después de soltar.
-        // Pausado mientras hay arte pendiente (ese job ya usa el tamaño nuevo).
-        if let Some(t) = size_settled_at {
-            if t.elapsed() > Duration::from_millis(300) {
-                size_settled_at = None;
-                if !pending_art
-                    && cover_key == state.key()
-                    && !state.title.is_empty()
-                    && (cover_w != cw(w) || cover_h != cover_rows(h))
-                {
-                    let _ = art_tx.send(ArtJob {
-                        key: cover_key.clone(),
-                        b64: art_b64.clone(),
-                        w: cw(w),
-                        h: cover_rows(h),
-                        viuer: cover_viuer,
-                    });
-                }
-            }
-        }
-        let mut lines = now_lines(&state, w, h, &cover);
-        let now_len = lines.len(); // bloque now (para geometría del mouse)
-        let mut lyrics_shown = false;
-        // zona compartida letras (igual que Go View: 2 blancos + zoneRows 1/3/9)
-        if !state.title.is_empty() && lyrics_on {
-            let ll = lyric_lines(&lyrics, state.position(), state.playing, cw(w), h);
-            if !ll.is_empty() {
-                lines.push(Line::raw(""));
-                lines.push(Line::raw(""));
-                lines.extend(ll);
-                lyrics_shown = true;
-            }
-        }
-        // centrado horizontal+vertical igual que Go: pad=(w-(cw+2))/2, top=(h-content)/2
-        let content_w = cw(w) + 2;
-        let pad = if w > content_w { (w - content_w) / 2 } else { 0 };
-        let top_pad = if h > lines.len() {
-            (h - lines.len()) / 2
+        // ---- vista Layout (rama exp): rects únicos para vista y mouse.
+        let cw_w = cw(w);
+        let content_w = cw_w;
+        let show_cov = show_cover(cover_img.is_some(), h);
+        let cov_h = if show_cov { cover_rows(h) } else { 0 };
+        let has_bar = state.duration > 0.0;
+        let ll: Vec<Line> = if !state.title.is_empty() && lyrics_on {
+            lyric_lines(&lyrics, state.position(), state.playing, cw_w.saturating_sub(2), h)
         } else {
-            0
+            vec![]
         };
-        let mut padded: Vec<Line> = vec![Line::raw(""); top_pad];
-        for l in lines {
-            // prepend pad espacios (las líneas ya traen sus 2 de indent)
-            let pre = " ".repeat(pad);
-            let mut spans = vec![ratatui::text::Span::raw(pre)];
-            spans.extend(l.spans);
-            padded.push(Line::from(spans));
+        let lyrics_shown = !ll.is_empty();
+        let zone_n = if lyrics_shown { zone_rows(h) } else { 0 };
+        // Filas espejo de Go: cover+blanco?, título, meta, gauge+tiempos?,
+        // blanco, controles, keys, blancos2?, zona?
+        let mut row_cons: Vec<Constraint> = vec![];
+        let mut r_cover: Option<usize> = None;
+        let (mut r_title, mut r_meta) = (0, 0);
+        let (mut r_gauge, mut r_times) = (None, None);
+        let (mut r_ctrl, mut r_keys) = (0, 0);
+        let mut r_lyr = None;
+        macro_rules! row {
+            ($c:expr) => {{
+                let idx = row_cons.len();
+                row_cons.push($c);
+                idx
+            }};
         }
+        if show_cov {
+            r_cover = Some(row!(Constraint::Length(cov_h as u16)));
+            row!(Constraint::Length(1)); // blanco tras cover
+        }
+        if state.title.is_empty() {
+            r_title = row!(Constraint::Length(1)); // "waiting…" reutiliza fila título
+        } else {
+            r_meta = row!(Constraint::Length(1));
+            if has_bar {
+                r_gauge = Some(row!(Constraint::Length(1)));
+                r_times = Some(row!(Constraint::Length(1)));
+            }
+            row!(Constraint::Length(1)); // blanco
+            r_ctrl = row!(Constraint::Length(1));
+            r_keys = row!(Constraint::Length(1));
+            if lyrics_shown {
+                row!(Constraint::Length(1));
+                row!(Constraint::Length(1));
+                r_lyr = Some(row!(Constraint::Length(zone_n as u16)));
+            }
+        }
+        let total: u16 = row_cons.iter().map(|c| match c {
+            Constraint::Length(n) => *n,
+            _ => 0,
+        }).sum();
+        let frame_rect = Rect::new(0, 0, w.min(u16::MAX as usize) as u16, h.min(u16::MAX as usize) as u16);
+        let v = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(total),
+            Constraint::Fill(1),
+        ])
+        .split(frame_rect);
+        let hz = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(content_w.min(w) as u16),
+            Constraint::Fill(1),
+        ])
+        .split(v[1]);
+        let content = hz[1];
+        let rows = Layout::vertical(row_cons).split(content);
+        let title_r = rows[r_title];
+        let gauge_rect: Option<Rect> = r_gauge.map(|i| rows[i]);
+        let lyr_rect: Option<Rect> = r_lyr.map(|i| rows[i]);
+        let ctrl_cells: Vec<Rect> = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+        ])
+        .split(rows[r_ctrl])
+        .to_vec();
+        let keys_cells: Vec<Rect> = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+        ])
+        .split(rows[r_keys])
+        .to_vec();
 
         term.draw(|f| {
-            let area = f.area();
-            f.render_widget(Paragraph::new(padded), area);
+            if state.title.is_empty() {
+                f.render_widget(
+                    Paragraph::new("waiting for the Music app… play something ♪")
+                        .alignment(Alignment::Center)
+                        .style(dim_style()),
+                    title_r,
+                );
+                return;
+            }
+            if let Some(ci) = r_cover {
+                if let Some(proto) = cover_proto.as_mut() {
+                    f.render_stateful_widget(StatefulImage::default(), rows[ci], proto);
+                }
+            }
+            let now = Instant::now();
+            let since = state.track_since.unwrap_or(now);
+            let title_spans: Vec<Span> = if state.fav {
+                vec![Span::raw(format!("{} ★", marquee(&state.title, cw_w, now, since)))]
+            } else if state.src != "podcast" {
+                vec![
+                    Span::raw(marquee(&state.title, cw_w, now, since)),
+                    Span::styled(" ☆", dim_style()),
+                ]
+            } else {
+                vec![Span::raw(marquee(&state.title, cw_w, now, since))]
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(title_spans)).alignment(Alignment::Center),
+                title_r,
+            );
+            f.render_widget(
+                Paragraph::new(marquee(&state.meta(), cw_w, now, since))
+                    .alignment(Alignment::Center)
+                    .style(dim_style()),
+                rows[r_meta],
+            );
+            if let (Some(gi), Some(ti)) = (r_gauge, r_times) {
+                let mut ratio = state.position() / state.duration;
+                ratio = ratio.clamp(0.0, 1.0);
+                f.render_widget(
+                    Gauge::default()
+                        .ratio(ratio)
+                        .gauge_style(Style::default())
+                        .use_unicode(true),
+                    rows[gi],
+                );
+                let left = fmt_time(state.position());
+                let mut remain = state.duration - state.position();
+                if remain < 0.0 {
+                    remain = 0.0;
+                }
+                let right = format!("-{}", fmt_time(remain));
+                f.render_widget(
+                    Paragraph::new(format!("{}  {}", left, right))
+                        .alignment(Alignment::Center)
+                        .style(dim_style()),
+                    rows[ti],
+                );
+            }
+            let (icons, keys) = control_icons(&state);
+            let dim = dim_style();
+            let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
+            for (i, cell) in ctrl_cells.iter().enumerate() {
+                let mut st = Style::default();
+                if i == 0 {
+                    st = if state.shuffle { bold } else { dim };
+                } else if i == 4 {
+                    st = if state.repeat != "" && state.repeat != "off" {
+                        bold
+                    } else {
+                        dim
+                    };
+                }
+                f.render_widget(
+                    Paragraph::new(icons[i].clone()).alignment(Alignment::Center).style(st),
+                    *cell,
+                );
+            }
+            for (i, cell) in keys_cells.iter().enumerate() {
+                f.render_widget(
+                    Paragraph::new(keys[i].clone()).alignment(Alignment::Center).style(dim),
+                    *cell,
+                );
+            }
+            if let Some(li) = r_lyr {
+                f.render_widget(Paragraph::new(ll.clone()), rows[li]);
+                let cur = lyric_current(&lyrics, state.position()).max(0) as usize;
+                let mut sb = ScrollbarState::new(lyrics.len().max(1)).position(cur);
+                f.render_stateful_widget(
+                    Scrollbar::new(ScrollbarOrientation::VerticalRight),
+                    rows[li],
+                    &mut sb,
+                );
+            }
         })?;
 
         // Tick: 100ms si hay marquee o si suena (barra fluida a 10fps;
@@ -1497,101 +1352,101 @@ fn main() -> io::Result<()> {
                 // relee arriba y el cover se re-renderiza con want_w/want_h).
                 Event::Resize(_, _) => {}
                 Event::Mouse(m) => {
-                    // Clicks como tu Go clickNow: barra seeks, controles
-                    // tocan, verso salta. Solo botón izquierdo.
+                    // Misma geometría que la vista: los Rects del Layout.
+                    // Solo botón izquierdo.
+                    use ratatui::layout::Position;
                     if m.kind != MouseEventKind::Down(MouseButton::Left) {
                         continue;
                     }
                     if state.title.is_empty() {
                         continue;
                     }
-                    let cx = (m.column as usize).saturating_sub(pad);
-                    let cy = (m.row as usize).saturating_sub(top_pad);
-                    if cy < now_len {
-                        // Recorre el bloque now: cover, título+meta,
-                        // barra, blanco, controles (igual que Go).
-                        let mut i = 0;
-                        if show_cover(&cover, h) {
-                            i += cover.lines().count() + 1;
-                        }
-                        // Click en el título: alterna ★/☆ (extra sobre Go,
-                        // donde el título no es clickeable).
-                        if cy == i {
-                            if state.src != "podcast" {
-                                state.fav = !state.fav;
-                                if state.fav {
-                                    osa_control("tell application \"Music\" to set favorited of current track to true");
-                                } else {
-                                    osa_control("tell application \"Music\" to set favorited of current track to false");
-                                }
+                    let pos = Position::new(m.column, m.row);
+                    // Título: alterna ★/☆.
+                    if title_r.contains(pos) {
+                        if state.src != "podcast" {
+                            state.fav = !state.fav;
+                            if state.fav {
+                                osa_control("tell application \"Music\" to set favorited of current track to true");
+                            } else {
+                                osa_control("tell application \"Music\" to set favorited of current track to false");
                             }
-                            continue;
                         }
-                        i += 2; // título + meta
-                        let bar_h = if state.duration > 0.0 { 2 } else { 0 };
-                        if bar_h == 2 && cy == i {
-                            // click en la barra: seek (optimista, confirma stream)
-                            let ratio = (cx.saturating_sub(2) as f64) / cw(w) as f64;
-                            let ratio = ratio.clamp(0.0, 1.0);
-                            let pos = ratio * state.duration;
+                        continue;
+                    }
+                    // Gauge: seek (optimista, confirma stream).
+                    if let Some(gr) = gauge_rect {
+                        if gr.contains(pos) {
+                            let ratio = if gr.width > 0 {
+                                (pos.x.saturating_sub(gr.x) as f64) / gr.width as f64
+                            } else {
+                                0.0
+                            };
+                            let pos = ratio.clamp(0.0, 1.0) * state.duration;
                             state.elapsed = pos;
                             state.at = Some(Instant::now());
                             transport_seek(state.src == "podcast", pos);
                             continue;
                         }
-                        i += bar_h + 1; // barra + blanco
-                        if cy == i || cy == i + 1 {
-                            let slot = (cw(w) / 5).max(1);
-                            let s = cx.saturating_sub(2) / slot;
-                            match s.min(4) {
-                                0 => {
-                                    if state.src == "podcast" {
-                                        continue; // igual que Go clickNow
-                                    }
-                                    state.shuffle = !state.shuffle;
-                                    transport_shuffle(state.shuffle);
-                                }
-                                1 => {
-                                    transport_prev(state.src == "podcast");
-                                    state.elapsed = 0.0;
-                                    state.at = Some(Instant::now());
-                                    state.track_since = Some(Instant::now());
-                                }
-                                2 => {
-                                    let to = !state.playing;
-                                    transport_pp(state.src == "podcast", to);
-                                    state.playing = to;
-                                    state.at = Some(Instant::now());
-                                    state.elapsed = state.position();
-                                    play_hold = Some(Instant::now() + Duration::from_millis(1500));
-                                }
-                                3 => {
-                                    transport_next(state.src == "podcast");
-                                    state.elapsed = 0.0;
-                                    state.at = Some(Instant::now());
-                                    state.track_since = Some(Instant::now());
-                                }
-                                _ => {
-                                    if state.src == "podcast" {
-                                        continue; // igual que Go clickNow
-                                    }
-                                    state.repeat_cycle();
-                                    transport_repeat(&state.repeat);
-                                }
-                            }
+                    }
+                    // Controles (ambas filas, igual que Go).
+                    let mut done = false;
+                    for (s, cell) in ctrl_cells.iter().chain(keys_cells.iter()).enumerate() {
+                        if !cell.contains(pos) {
                             continue;
                         }
-                    } else if lyrics_shown {
-                        // click en un verso: salta ahí (igual que Go seekLyric)
-                        let vis = lyric_visual(&lyrics, state.position(), cw(w), h);
-                        let row = cy - now_len;
-                        if row >= 2 {
-                            let li = row - 2;
-                            if li < vis.len() {
-                                let pos = lyrics[vis[li].idx].sec + 0.01;
-                                state.elapsed = pos;
+                        done = true;
+                        match s % 5 {
+                            0 => {
+                                if state.src == "podcast" {
+                                    break;
+                                }
+                                state.shuffle = !state.shuffle;
+                                transport_shuffle(state.shuffle);
+                            }
+                            1 => {
+                                transport_prev(state.src == "podcast");
+                                state.elapsed = 0.0;
                                 state.at = Some(Instant::now());
-                                transport_seek(state.src == "podcast", pos);
+                                state.track_since = Some(Instant::now());
+                            }
+                            2 => {
+                                let to = !state.playing;
+                                transport_pp(state.src == "podcast", to);
+                                state.playing = to;
+                                state.at = Some(Instant::now());
+                                state.elapsed = state.position();
+                                play_hold = Some(Instant::now() + Duration::from_millis(1500));
+                            }
+                            3 => {
+                                transport_next(state.src == "podcast");
+                                state.elapsed = 0.0;
+                                state.at = Some(Instant::now());
+                                state.track_since = Some(Instant::now());
+                            }
+                            _ => {
+                                if state.src == "podcast" {
+                                    break;
+                                }
+                                state.repeat_cycle();
+                                transport_repeat(&state.repeat);
+                            }
+                        }
+                        break;
+                    }
+                    if done {
+                        continue;
+                    }
+                    // Verso: salta ahí.
+                    if let Some(lr) = lyr_rect {
+                        if lr.contains(pos) && lyrics_shown {
+                            let vis = lyric_visual(&lyrics, state.position(), cw_w.saturating_sub(2), h);
+                            let row = pos.y.saturating_sub(lr.y).saturating_sub(2) as usize;
+                            if row < vis.len() {
+                                let sec = lyrics[vis[row].idx].sec + 0.01;
+                                state.elapsed = sec;
+                                state.at = Some(Instant::now());
+                                transport_seek(state.src == "podcast", sec);
                             }
                         }
                     }
@@ -1680,10 +1535,6 @@ mod tests {
         assert!(cw(20) >= 16);
     }
     #[test]
-    fn bar_empty_no_dur() {
-        assert!(progress_bar(0.0, 0.0, 59).is_empty());
-    }
-    #[test]
     fn zone_rows_parity() {
         // igual que Go TestZoneRows: tiny 1, short 3, full 9
         assert_eq!(zone_rows(0), LYRIC_ROWS);
@@ -1693,9 +1544,9 @@ mod tests {
     }
     #[test]
     fn show_cover_tiny() {
-        assert!(!show_cover("x\ny", 15));
-        assert!(show_cover("x\ny", 30));
-        assert!(!show_cover("", 40));
+        assert!(!show_cover(true, 15));
+        assert!(show_cover(true, 30));
+        assert!(!show_cover(false, 40));
     }
 }
 
