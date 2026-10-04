@@ -255,7 +255,7 @@ pub(crate) fn run() -> io::Result<()> {
         // blanco, controles, keys, blancos2?, zona?
         let mut row_cons: Vec<Constraint> = vec![];
         let mut r_cover: Option<usize> = None;
-        let (mut r_title, mut r_meta) = (0, 0);
+        let (r_title, r_meta): (usize, usize);
         let (mut r_gauge, mut r_times) = (None, None);
         let (mut r_ctrl, mut r_keys) = (0, 0);
         let mut r_lyr = None;
@@ -275,7 +275,9 @@ pub(crate) fn run() -> io::Result<()> {
         }
         if state.title.is_empty() {
             r_title = row!(Constraint::Length(1)); // "waiting…" reutiliza fila título
+            r_meta = r_title;
         } else {
+            r_title = row!(Constraint::Length(1));
             r_meta = row!(Constraint::Length(1));
             if has_bar {
                 r_gauge = Some(row!(Constraint::Length(1)));
