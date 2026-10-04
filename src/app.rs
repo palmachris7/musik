@@ -242,7 +242,19 @@ pub(crate) fn run() -> io::Result<()> {
         // de hasta 62; con 60 se recortaba la derecha: "-2:", sin ↻/r).
         let content_w = cw_w + 2;
         let show_cov = show_cover(cover_img.is_some(), h);
-        let cov_h = if show_cov { cover_rows(h) } else { 0 };
+        // Área según aspecto real (celdas 1:2): sin filas muertas bajo la
+        // foto. Tope cover_rows como tu Go.
+        let cov_h = if show_cov {
+            match cover_img.as_ref() {
+                Some((_, img)) => {
+                    let (iw, ih) = (img.width().max(1), img.height().max(1));
+                    ((cw_w as u32 * ih / iw / 2).max(4) as usize).min(cover_rows(h))
+                }
+                None => 0,
+            }
+        } else {
+            0
+        };
         let has_bar = state.duration > 0.0;
         let ll: Vec<Line> = if !state.title.is_empty() && lyrics_on {
             lyric_lines(&lyrics, state.position(), state.playing, cw_w.saturating_sub(2), h)
