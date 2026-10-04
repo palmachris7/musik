@@ -336,6 +336,28 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
         let content = hz[1];
         let rows = Layout::vertical(row_cons).split(content);
         let title_r = rows[r_title];
+        // La foto se centra dentro de su área con su aspecto real (Fit):
+        // el protocolo la pega arriba-izquierda y si no es cuadrada
+        // queda el hueco a la derecha.
+        let cover_r: Option<Rect> = r_cover.map(|i| {
+            let area = rows[i];
+            let (img_w, img_h) = cover_img
+                .as_ref()
+                .map(|(_, img)| (img.width().max(1), img.height().max(1)))
+                .unwrap_or((1, 1));
+            let (fw, fh) = picker.font_size();
+            let (fw, fh) = (fw.max(1) as f64, fh.max(1) as f64);
+            let (aw, ah) = (area.width.max(1) as f64, area.height.max(1) as f64);
+            let s = ((aw * fw) / img_w as f64).min((ah * fh) / img_h as f64);
+            let cw2 = ((img_w as f64 * s / fw).round() as u16).clamp(1, area.width);
+            let ch2 = ((img_h as f64 * s / fh).round() as u16).clamp(1, area.height);
+            Rect::new(
+                area.x + (area.width - cw2) / 2,
+                area.y + (area.height - ch2) / 2,
+                cw2,
+                ch2,
+            )
+        });
         let gauge_rect: Option<Rect> = r_gauge.map(|i| rows[i]);
         let lyr_rect: Option<Rect> = r_lyr.map(|i| rows[i]);
         let ctrl_cells: Vec<Rect> = Layout::horizontal([
@@ -367,9 +389,9 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                 );
                 return;
             }
-            if let Some(ci) = r_cover {
+            if let Some(cr) = cover_r {
                 if let Some(proto) = cover_proto.as_mut() {
-                    f.render_stateful_widget(StatefulImage::default(), rows[ci], proto);
+                    f.render_stateful_widget(StatefulImage::default(), cr, proto);
                 }
             }
             let now = Instant::now();
