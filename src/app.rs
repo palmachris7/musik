@@ -238,7 +238,9 @@ pub(crate) fn run() -> io::Result<()> {
         }
         // ---- vista Layout (rama exp): rects únicos para vista y mouse.
         let cw_w = cw(w);
-        let content_w = cw_w;
+        // Ancho contenido = cw+2 como tu Go (las líneas traen indent/texto
+        // de hasta 62; con 60 se recortaba la derecha: "-2:", sin ↻/r).
+        let content_w = cw_w + 2;
         let show_cov = show_cover(cover_img.is_some(), h);
         let cov_h = if show_cov { cover_rows(h) } else { 0 };
         let has_bar = state.duration > 0.0;
@@ -266,7 +268,10 @@ pub(crate) fn run() -> io::Result<()> {
         }
         if show_cov {
             r_cover = Some(row!(Constraint::Length(cov_h as u16)));
-            row!(Constraint::Length(1)); // blanco tras cover
+            // Doble blanco tras foto: si el protocolo pinta de más (métrica
+            // de fuente), se come blancos y nunca el título.
+            row!(Constraint::Length(1));
+            row!(Constraint::Length(1));
         }
         if state.title.is_empty() {
             r_title = row!(Constraint::Length(1)); // "waiting…" reutiliza fila título
