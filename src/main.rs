@@ -39,13 +39,9 @@ fn main() -> io::Result<()> {
     if args.iter().any(|a| a == "--cover=halfblocks") {
         cover_mode = crate::app::CoverMode::Halfblocks;
     }
-    // Escala HiDPI para la foto (Retina = puntos vs píxeles). Default 2.0
-    // en macOS-arm64 (todo Retina), 1.0 resto. Override: --hidpi 1.
-    let mut hidpi = if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-        2.0
-    } else {
-        1.0
-    };
+    // Escala HiDPI para la foto (Retina = puntos vs píxeles).
+    // Default 1.0 (lo probado); override manual con --hidpi 2.
+    let mut hidpi = 1.0;
     for w in args.windows(2) {
         if w[0] == "--hidpi" {
             if let Ok(n) = w[1].parse::<f64>() {
