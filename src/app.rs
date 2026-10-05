@@ -638,9 +638,11 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                         continue;
                     }
                     // Verso: salta ahí (ventana cacheada del frame: exacta).
+                    // lr.y YA es la primera línea (los 2 blancos quedan
+                    // fuera del rect): sin restar nada más.
                     if let Some(lr) = lyr_rect {
                         if lr.contains(pos) && lyrics_shown {
-                            let row = pos.y.saturating_sub(lr.y).saturating_sub(2) as usize;
+                            let row = pos.y.saturating_sub(lr.y) as usize;
                             if let Some(&li) = vis_cache.get(row) {
                                 if let Some(lyr) = lyrics.get(li) {
                                     let sec = lyr.sec + 0.01;
