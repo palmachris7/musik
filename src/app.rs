@@ -87,6 +87,7 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
     let mut art_deadline: Option<Instant> = None;
     let mut lyrics: Vec<Lyric> = vec![];
     let mut lyrics_on = true;
+    let mut vis_cache: Vec<usize> = vec![]; // ventana pintada (para clicks exactos)
 
     // Estado inicial instantáneo (el stream solo manda diffs al cambiar algo).
     if let Some(mut fresh) = fetch_now() {
@@ -281,8 +282,20 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
             0
         };
         let has_bar = state.duration > 0.0;
+        // Una sola posición por frame: la ventana visible y el click usan
+        // exactamente lo mismo (si no, al cruzar un verso el click cae mal).
+        let frame_pos = state.position();
+        let frame_vis: Vec<usize> = if !state.title.is_empty() && lyrics_on && !lyrics.is_empty() {
+            lyric_visual(&lyrics, frame_pos, cw_w.saturating_sub(2), h)
+                .into_iter()
+                .map(|v| v.idx)
+                .collect()
+        } else {
+            vec![]
+        };
+        vis_cache = frame_vis;
         let ll: Vec<Line> = if !state.title.is_empty() && lyrics_on {
-            lyric_lines(&lyrics, state.position(), state.playing, cw_w.saturating_sub(2), h)
+            lyric_lines(&lyrics, frame_pos, state.playing, cw_w.saturating_sub(2), h)
         } else {
             vec![]
         };
@@ -624,16 +637,17 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                     if done {
                         continue;
                     }
-                    // Verso: salta ahí.
+                    // Verso: salta ahí (ventana cacheada del frame: exacta).
                     if let Some(lr) = lyr_rect {
                         if lr.contains(pos) && lyrics_shown {
-                            let vis = lyric_visual(&lyrics, state.position(), cw_w.saturating_sub(2), h);
                             let row = pos.y.saturating_sub(lr.y).saturating_sub(2) as usize;
-                            if row < vis.len() {
-                                let sec = lyrics[vis[row].idx].sec + 0.01;
-                                state.elapsed = sec;
-                                state.at = Some(Instant::now());
-                                transport_seek(state.src == "podcast", sec);
+                            if let Some(&li) = vis_cache.get(row) {
+                                if let Some(lyr) = lyrics.get(li) {
+                                    let sec = lyr.sec + 0.01;
+                                    state.elapsed = sec;
+                                    state.at = Some(Instant::now());
+                                    transport_seek(state.src == "podcast", sec);
+                                }
                             }
                         }
                     }
