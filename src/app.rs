@@ -29,7 +29,7 @@ pub(crate) enum CoverMode {
     Halfblocks,
 }
 
-pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
+pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -54,20 +54,32 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
     // en fade o poll viejo) no puede devolver el icono. Sin esto se ve lag.
     let mut play_hold: Option<Instant> = None;
     // Rama exp: dos formas de cover. `foto` (auto) o `halfblocks` (texto).
-    // Escala HiDPI: en Retina la fuente reportada viene en puntos y los
-    // píxeles reales son 2x; sin escalar, la foto sale a mitad anclada
-    // arriba-izquierda.
+    // HiDPI: el bitmap se dimensiona con la fuente; en Retina va x2 para
+    // llenar las celdas (el centrado usa ratio, inmune al DPI).
     let picker = match cover_mode {
         CoverMode::Halfblocks => {
             let mut p = Picker::from_fontsize((8, 16));
             p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
             p
         }
-        CoverMode::Foto => Picker::from_query_stdio().unwrap_or_else(|_| {
-            let mut p = Picker::from_fontsize((8, 16));
-            p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
-            p
-        }),
+        CoverMode::Foto => match Picker::from_query_stdio() {
+            Ok(p) => {
+                let (fw, fh) = p.font_size();
+                let proto = p.protocol_type();
+                let scaled = (
+                    (fw.max(1) as f64 * hidpi).round() as u16,
+                    (fh.max(1) as f64 * hidpi).round() as u16,
+                );
+                let mut np = Picker::from_fontsize((scaled.0.max(1), scaled.1.max(1)));
+                np.set_protocol_type(proto);
+                np
+            }
+            Err(_) => {
+                let mut p = Picker::from_fontsize((8, 16));
+                p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+                p
+            }
+        },
     };
     dlog!(
         "picker proto={:?} font={:?} mode={}",
@@ -379,16 +391,21 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
         // queda el hueco a la derecha.
         let cover_r: Option<Rect> = r_cover.map(|i| {
             let area = rows[i];
+            // Centrado solo con aspecto (ratio de celda, invariante al DPI):
+            // nunca con píxeles absolutos (mienten en Retina).
             let (img_w, img_h) = cover_img
                 .as_ref()
-                .map(|(_, img)| (img.width().max(1), img.height().max(1)))
-                .unwrap_or((1, 1));
+                .map(|(_, img)| (img.width().max(1) as f64, img.height().max(1) as f64))
+                .unwrap_or((1.0, 1.0));
             let (fw, fh) = picker.font_size();
-            let (fw, fh) = (fw.max(1) as f64, fh.max(1) as f64);
-            let (aw, ah) = (area.width.max(1) as f64, area.height.max(1) as f64);
-            let s = ((aw * fw) / img_w as f64).min((ah * fh) / img_h as f64);
-            let cw2 = ((img_w as f64 * s / fw).round() as u16).clamp(1, area.width);
-            let ch2 = ((img_h as f64 * s / fh).round() as u16).clamp(1, area.height);
+            let cell_ratio = fh.max(1) as f64 / fw.max(1) as f64; // ~2.0 siempre
+            let (aw, ah) = (area.width as f64, area.height as f64);
+            let mut cw2 = aw.min(ah * cell_ratio * img_w / img_h);
+            let mut ch2 = ah.min(aw / (cell_ratio * img_w / img_h));
+            cw2 = cw2.max(1.0);
+            ch2 = ch2.max(1.0);
+            let cw2 = cw2 as u16;
+            let ch2 = ch2 as u16;
             Rect::new(
                 area.x + (area.width - cw2) / 2,
                 area.y + (area.height - ch2) / 2,
