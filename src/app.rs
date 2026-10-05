@@ -77,6 +77,7 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
     );
     let mut cover_img: Option<(String, DynamicImage)> = None; // (key, imagen)
     let mut cover_proto: Option<StatefulProtocol> = None; // render del área
+    let mut cover_txt: Option<(String, u16, u16, String)> = None; // halfblocks: (key,w,h,texto)
     let mut cover_key = String::new(); // key de la carátula MOSTRADA
     let mut cover_fresh = false; // true si lo mostrado viene del stream de este track
     let mut last_cover_rect: Option<Rect> = None; // para loguear cambios
@@ -262,15 +263,19 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
         // de hasta 62; con 60 se recortaba la derecha: "-2:", sin ↻/r).
         let content_w = cw_w + 2;
         let show_cov = show_cover(cover_img.is_some(), h);
-        // Área según aspecto real (celdas 1:2): sin filas muertas bajo la
-        // foto. Tope cover_rows como tu Go.
+        // Halfblocks: alto fijo full-bleed como chafa (el string llena todo).
+        // Foto: área según aspecto real (celdas 1:2), tope cover_rows.
         let cov_h = if show_cov {
-            match cover_img.as_ref() {
-                Some((_, img)) => {
-                    let (iw, ih) = (img.width().max(1), img.height().max(1));
-                    ((cw_w as u32 * ih / iw / 2).max(4) as usize).min(cover_rows(h))
+            if cover_mode == CoverMode::Halfblocks {
+                cover_rows(h)
+            } else {
+                match cover_img.as_ref() {
+                    Some((_, img)) => {
+                        let (iw, ih) = (img.width().max(1), img.height().max(1));
+                        ((cw_w as u32 * ih / iw / 2).max(4) as usize).min(cover_rows(h))
+                    }
+                    None => 0,
                 }
-                None => 0,
             }
         } else {
             0
@@ -402,7 +407,38 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                     dlog!("cover rect {:?} img={}", cr, cover_img.as_ref().map(|(_, img)| format!("{}x{}", img.width(), img.height())).unwrap_or_default());
                     last_cover_rect = Some(cr);
                 }
-                if let Some(proto) = cover_proto.as_mut() {
+                if cover_mode == CoverMode::Halfblocks {
+                    // String a celdas exactas (caché por track+tamaño): el
+                    // mismo path centrado que todo lo demás, cero protocolo.
+                    let area = rows[r_cover.unwrap()];
+                    let key = cover_key.clone();
+                    let cached = match &cover_txt {
+                        Some((k, ew, eh, _)) if *k == key && *ew == area.width && *eh == area.height => true,
+                        _ => false,
+                    };
+                    if !cached {
+                        if let Some((_, img)) = cover_img.as_ref() {
+                            let text = halfblocks_string(img, area.width as usize, area.height as usize);
+                            cover_txt = Some((key, area.width, area.height, text));
+                        }
+                    }
+                    if let Some((_, _, _, text)) = cover_txt.as_ref() {
+                        use ansi_to_tui::IntoText;
+                        if let Ok(tt) = text.as_str().into_text() {
+                            for (dy, l) in tt.lines.into_iter().enumerate() {
+                                if dy >= area.height as usize {
+                                    break;
+                                }
+                                let mut spans = vec![Span::raw("".to_string())];
+                                spans.extend(l.spans);
+                                f.render_widget(
+                                    Paragraph::new(Line::from(spans)),
+                                    Rect::new(area.x, area.y + dy as u16, area.width, 1),
+                                );
+                            }
+                        }
+                    }
+                } else if let Some(proto) = cover_proto.as_mut() {
                     f.render_stateful_widget(StatefulImage::default(), cr, proto);
                 }
             }
