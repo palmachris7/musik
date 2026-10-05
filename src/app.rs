@@ -87,6 +87,7 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
     let mut art_deadline: Option<Instant> = None;
     let mut lyrics: Vec<Lyric> = vec![];
     let mut lyrics_on = true;
+    let mut seeking = false; // arrastre en la barra (igual que Go)
     let mut vis_cache: Vec<usize> = vec![]; // ventana pintada (para clicks exactos)
 
     // Estado inicial instantáneo (el stream solo manda diffs al cambiar algo).
@@ -553,8 +554,29 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                 Event::Resize(_, _) => {}
                 Event::Mouse(m) => {
                     // Misma geometría que la vista: los Rects del Layout.
-                    // Solo botón izquierdo.
                     use ratatui::layout::Position;
+                    // Soltar siempre corta el arrastre (igual que Go seeking).
+                    if m.kind == MouseEventKind::Up(MouseButton::Left) {
+                        seeking = false;
+                        continue;
+                    }
+                    // Arrastrar con botón held: seek continuo.
+                    if m.kind == MouseEventKind::Drag(MouseButton::Left) {
+                        if seeking && !state.title.is_empty() && state.duration > 0.0 {
+                            if let Some(gr) = gauge_rect {
+                                let ratio = if gr.width > 0 {
+                                    (m.column.saturating_sub(gr.x) as f64) / gr.width as f64
+                                } else {
+                                    0.0
+                                };
+                                let pos = ratio.clamp(0.0, 1.0) * state.duration;
+                                state.elapsed = pos;
+                                state.at = Some(Instant::now());
+                                transport_seek(state.src == "podcast", pos);
+                            }
+                        }
+                        continue;
+                    }
                     if m.kind != MouseEventKind::Down(MouseButton::Left) {
                         continue;
                     }
@@ -577,6 +599,7 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                     // Gauge: seek (optimista, confirma stream).
                     if let Some(gr) = gauge_rect {
                         if gr.contains(pos) {
+                            seeking = true;
                             let ratio = if gr.width > 0 {
                                 (pos.x.saturating_sub(gr.x) as f64) / gr.width as f64
                             } else {
