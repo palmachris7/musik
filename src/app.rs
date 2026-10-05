@@ -88,6 +88,7 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
     let mut lyrics: Vec<Lyric> = vec![];
     let mut lyrics_on = true;
     let mut seeking = false; // arrastre en la barra (igual que Go)
+    let mut last_seek_sent = Instant::now() - Duration::from_secs(10);
     let mut vis_cache: Vec<usize> = vec![]; // ventana pintada (para clicks exactos)
 
     // Estado inicial instantáneo (el stream solo manda diffs al cambiar algo).
@@ -129,7 +130,12 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                     }
                     let hold = matches!(play_hold, Some(dl) if at < dl);
                     let local_playing = state.playing;
-                    if merge_update(&mut state, &u, at) {
+                    // Arrastrando: el remoto no mueve la barra (como play_hold).
+                    let local_elapsed = state.elapsed;
+                    let local_at = state.at;
+                    let was_seeking = seeking;
+                    let changed = merge_update(&mut state, &u, at);
+                    if changed {
                         dlog!("TRACK CHANGED -> {}", state.title);
                         state.track_since = Some(at);
                         t_change = Some(at);
@@ -166,6 +172,11 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                         state.playing = local_playing;
                     } else if !hold {
                         play_hold = None;
+                    }
+                    if was_seeking && !changed {
+                        // Arrastrando: la barra es mía hasta soltar.
+                        state.elapsed = local_elapsed;
+                        state.at = local_at;
                     }
                 }
                 BgMsg::CoverReady { key, img, fresh } => {
@@ -555,14 +566,38 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                 Event::Mouse(m) => {
                     // Misma geometría que la vista: los Rects del Layout.
                     use ratatui::layout::Position;
-                    // Soltar siempre corta el arrastre (igual que Go seeking).
+                    // Soltar siempre corta el arrastre (igual que Go seeking)
+                    // y manda el seek final en la posición de release.
                     if m.kind == MouseEventKind::Up(MouseButton::Left) {
-                        seeking = false;
+                        if seeking {
+                            seeking = false;
+                            if !state.title.is_empty() && state.duration > 0.0 {
+                                if let Some(gr) = gauge_rect {
+                                    let ratio = if gr.width > 0 {
+                                        (m.column.saturating_sub(gr.x) as f64) / gr.width as f64
+                                    } else {
+                                        0.0
+                                    };
+                                    let pos = ratio.clamp(0.0, 1.0) * state.duration;
+                                    state.elapsed = pos;
+                                    state.at = Some(Instant::now());
+                                    transport_seek(state.src == "podcast", pos);
+                                    last_seek_sent = Instant::now();
+                                }
+                            }
+                        } else {
+                            seeking = false;
+                        }
                         continue;
                     }
-                    // Arrastrar con botón held: seek continuo.
+                    // Arrastrar con botón held: seek continuo con throttle
+                    // (máx 1/120ms; el final va al soltar).
                     if m.kind == MouseEventKind::Drag(MouseButton::Left) {
-                        if seeking && !state.title.is_empty() && state.duration > 0.0 {
+                        if seeking
+                            && !state.title.is_empty()
+                            && state.duration > 0.0
+                            && last_seek_sent.elapsed() > Duration::from_millis(120)
+                        {
                             if let Some(gr) = gauge_rect {
                                 let ratio = if gr.width > 0 {
                                     (m.column.saturating_sub(gr.x) as f64) / gr.width as f64
@@ -573,6 +608,7 @@ pub(crate) fn run(cover_mode: CoverMode) -> io::Result<()> {
                                 state.elapsed = pos;
                                 state.at = Some(Instant::now());
                                 transport_seek(state.src == "podcast", pos);
+                                last_seek_sent = Instant::now();
                             }
                         }
                         continue;
