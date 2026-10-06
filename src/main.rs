@@ -39,13 +39,9 @@ fn main() -> io::Result<()> {
     if args.iter().any(|a| a == "--cover=halfblocks") {
         cover_mode = crate::app::CoverMode::Halfblocks;
     }
-    // Escala HiDPI del bitmap (default 2.0 en macOS-arm64). El centrado
-    // usa ratio y no le afecta.
-    let mut hidpi = if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-        2.0
-    } else {
-        1.0
-    };
+    // Escala del bitmap. 1.0 evita que el protocolo nativo desplace o recorte
+    // la imagen en terminales Retina; puede ajustarse con --hidpi.
+    let mut hidpi = 1.0;
     for w in args.windows(2) {
         if w[0] == "--hidpi" {
             if let Ok(n) = w[1].parse::<f64>() {

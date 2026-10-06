@@ -16,7 +16,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
-use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
+use ratatui_image::{Resize, StatefulImage, picker::Picker, protocol::StatefulProtocol};
 
 use crate::lyrics::{lyric_lines, lyric_visual, zone_rows};
 use crate::media::*;
@@ -386,33 +386,8 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
         let content = hz[1];
         let rows = Layout::vertical(row_cons).split(content);
         let title_r = rows[r_title];
-        // La foto se centra dentro de su área con su aspecto real (Fit):
-        // el protocolo la pega arriba-izquierda y si no es cuadrada
-        // queda el hueco a la derecha.
-        let cover_r: Option<Rect> = r_cover.map(|i| {
-            let area = rows[i];
-            // Centrado solo con aspecto (ratio de celda, invariante al DPI):
-            // nunca con píxeles absolutos (mienten en Retina).
-            let (img_w, img_h) = cover_img
-                .as_ref()
-                .map(|(_, img)| (img.width().max(1) as f64, img.height().max(1) as f64))
-                .unwrap_or((1.0, 1.0));
-            let (fw, fh) = picker.font_size();
-            let cell_ratio = fh.max(1) as f64 / fw.max(1) as f64; // ~2.0 siempre
-            let (aw, ah) = (area.width as f64, area.height as f64);
-            let mut cw2 = aw.min(ah * cell_ratio * img_w / img_h);
-            let mut ch2 = ah.min(aw / (cell_ratio * img_w / img_h));
-            cw2 = cw2.max(1.0);
-            ch2 = ch2.max(1.0);
-            let cw2 = cw2 as u16;
-            let ch2 = ch2 as u16;
-            Rect::new(
-                area.x + (area.width - cw2) / 2,
-                area.y + (area.height - ch2) / 2,
-                cw2,
-                ch2,
-            )
-        });
+        // Foto: pasar el área completa. StatefulImage calcula el ajuste y el centrado.
+        let cover_r: Option<Rect> = r_cover.map(|i| rows[i]);
         let gauge_rect: Option<Rect> = r_gauge.map(|i| rows[i]);
         let lyr_rect: Option<Rect> = r_lyr.map(|i| rows[i]);
         let ctrl_cells: Vec<Rect> = Layout::horizontal([
@@ -450,8 +425,7 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                     last_cover_rect = Some(cr);
                 }
                 if cover_mode == CoverMode::Halfblocks {
-                    // String a celdas exactas (caché por track+tamaño): el
-                    // mismo path centrado que todo lo demás, cero protocolo.
+                    // String a celdas exactas (caché por track+tamaño).
                     let area = rows[r_cover.unwrap()];
                     let key = cover_key.clone();
                     let cached = match &cover_txt {
@@ -468,10 +442,8 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                         use ansi_to_tui::IntoText;
                         if let Ok(tt) = text.as_str().into_text() {
                             for (dy, l) in tt.lines.into_iter().enumerate() {
-                                if dy >= area.height as usize {
-                                    break;
-                                }
-                                let mut spans = vec![Span::raw("".to_string())];
+                                if dy >= area.height as usize { break; }
+                                let mut spans = vec![Span::raw(String::new())];
                                 spans.extend(l.spans);
                                 f.render_widget(
                                     Paragraph::new(Line::from(spans)),
@@ -481,7 +453,11 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                         }
                     }
                 } else if let Some(proto) = cover_proto.as_mut() {
-                    f.render_stateful_widget(StatefulImage::default(), cr, proto);
+                    f.render_stateful_widget(
+                        StatefulImage::default().resize(Resize::Scale(Some(image::imageops::FilterType::Lanczos3))),
+                        cr,
+                        proto,
+                    );
                 }
             }
             let now = Instant::now();
@@ -566,12 +542,12 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
             }
         })?;
 
-        // Tick: 100ms si hay marquee o si suena (barra fluida a 10fps;
-        // tu Go usa 500ms sonando — acá se ve más vivo), 2s quieto.
+        // Tick: 100ms con marquee (pasos ~10/s), 250ms sonando (la barra
+        // no necesita 10fps; menos redraw = menos trabajo), 2s quieto.
         let tick = if marquee_live(&state, cw(w)) {
             Duration::from_millis(100)
         } else if state.playing {
-            Duration::from_millis(100)
+            Duration::from_millis(250)
         } else {
             Duration::from_secs(2)
         };
