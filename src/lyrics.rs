@@ -264,14 +264,6 @@ pub(crate) fn lyric_visual(lyrics: &[Lyric], pos: f64, w: usize, term_h: usize) 
     flat.into_iter().skip(start).take(end - start).collect()
 }
 
-pub(crate) fn center_text(s: &str, w: usize) -> String {
-    let r = s.chars().count();
-    if r >= w {
-        return s.to_string();
-    }
-    " ".repeat((w - r) / 2) + s
-}
-
 pub(crate) fn lyric_lines(lyrics: &[Lyric], pos: f64, playing: bool, w: usize, term_h: usize) -> Vec<Line<'static>> {
     if lyrics.is_empty() {
         return vec![];
@@ -281,11 +273,12 @@ pub(crate) fn lyric_lines(lyrics: &[Lyric], pos: f64, playing: bool, w: usize, t
     let dim = dim_style();
     let mut out: Vec<Line> = vec![];
     for v in lyric_visual(lyrics, pos, w, term_h) {
-        let t = center_text(&v.text, w + 2);
+        // Sin padding manual: el Paragraph centra con Alignment::Center,
+        // igual que título/meta (el floor de center_text desviaba 1).
         if v.idx as i64 == cur && v.first && playing {
-            out.push(Line::from(vec![ratatui::text::Span::styled(t, bold)]));
+            out.push(Line::from(vec![ratatui::text::Span::styled(v.text.clone(), bold)]));
         } else {
-            out.push(Line::from(vec![ratatui::text::Span::styled(t, dim)]));
+            out.push(Line::from(vec![ratatui::text::Span::styled(v.text.clone(), dim)]));
         }
     }
     while out.len() < zone_rows(term_h) {

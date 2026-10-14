@@ -11,7 +11,10 @@ macro_rules! dlog {
 }
 
 mod app;
+mod catalog;
+mod finder;
 mod lyrics;
+mod finder_thread;
 mod media;
 mod state;
 mod view;

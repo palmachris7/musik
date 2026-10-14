@@ -381,5 +381,136 @@ pub(crate) fn spawn_lyr_fetch(key: String, artist: String, title: String, album:
     });
 }
 
+// ---- finder biblioteca (igual que Go SearchLibrary/PlayTrackInLibrary) ----
+fn esc(s: &str) -> String { s.replace('\\', "\\\\").replace('"', "\\\"") }
+
+pub(crate) fn search_library(q: &str) -> Vec<crate::finder::Found> {
+    // Un solo osascript como Go SearchLibrary (el doble call bloqueaba el UI por tecla).
+    let script = format!("tell application \"Music\"\nset rs to search playlist \"Library\" for \"{}\"\nset o to \"\"\nset i to 0\nrepeat with t in rs\nset o to o & name of t & \"||\" & artist of t & \"||\" & album of t & \"\\n\"\nset i to i + 1\nif i >= 30 then exit repeat\nend repeat\nreturn o\nend tell", esc(q));
+    let out = match Command::new("osascript").arg("-e").arg(&script).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return vec![],
+    };
+    out.lines().filter_map(|l| {
+        let p: Vec<&str> = l.split("||").collect();
+        if p.is_empty() || p[0].trim().is_empty() { return None; }
+        Some(crate::finder::Found { name: p[0].trim().to_string(), artist: p.get(1).unwrap_or(&"").trim().to_string(), album: p.get(2).unwrap_or(&"").trim().to_string() })
+    }).collect()
+}
+
+pub(crate) fn play_catalog_song(s: &crate::catalog::Song) {
+    // Igual que Go playCatalogSongCmd: match biblioteca → shortcut
+    // headless music-cli-play → abrir URL en Music como último recurso.
+    let q = format!("{} {}", s.title, s.artist);
+    if !q.trim().is_empty() && play_first_match(&q) { return; } // PlayFirstLibraryMatch idéntico a Go
+    if shortcut_exists("music-cli-play") {
+        let before = fetch_now().map(|n| (n.title, n.playing));
+        let _ = std::process::Command::new("shortcuts").args(["run", "music-cli-play", "-i", &q]).output();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let after = fetch_now().map(|n| (n.title, n.playing));
+        if before != after { return; } // algo empezó a sonar: listo
+    }
+    if !s.url.is_empty() {
+        let _ = std::process::Command::new("open").args(["-a", "Music", &s.url]).spawn();
+    }
+}
+fn shortcut_exists(name: &str) -> bool {
+    Command::new("shortcuts").arg("list").output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim() == name))
+        .unwrap_or(false)
+}
+
+// ---- índice biblioteca (álbumes/artistas/playlists), caché por sesión ----
+static INDEX: std::sync::OnceLock<std::sync::Mutex<Option<(Vec<String>, Vec<String>, Vec<String>)>>> = std::sync::OnceLock::new();
+
+pub(crate) fn kick_index() {
+    let m = INDEX.get_or_init(|| std::sync::Mutex::new(None));
+    if m.lock().ok().and_then(|g| g.clone()).is_some() { return; }
+    std::thread::spawn(|| {
+        let albums = osa_list("album", "||");
+        let artists = osa_list("artist", "||");
+        let playlists = osa_playlists();
+        if let Some(m) = INDEX.get() { *m.lock().unwrap() = Some((albums, artists, playlists)); }
+    });
+}
+fn osa_out(script: &str) -> String {
+    Command::new("osascript").arg("-e").arg(script).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+}
+fn osa_list(getter: &str, sep: &str) -> Vec<String> {
+    // El delimitador debe fijarse DENTRO del script; si no Music devuelve
+    // todo pegado con ", " y salía una sola fila gigante.
+    let full = format!("tell application \"Music\"\nset AppleScript's text item delimiters to \"{}\"\nset xs to {} of tracks of playlist \"Library\"\nreturn xs as string\nend tell", sep, getter);
+    let out = osa_out(&full);
+    let mut seen = std::collections::HashSet::new();
+    let mut v = vec![];
+    for p in out.split(sep) {
+        let t = p.trim().to_string();
+        if !t.is_empty() && seen.insert(t.clone()) { v.push(t); }
+    }
+    v
+}
+fn osa_playlists() -> Vec<String> {
+    let out = osa_out("tell application \"Music\"\nset o to \"\"\nrepeat with p in every playlist\nif special kind of p as string is \"none\" then\nset o to o & name of p & \"||\"\nend if\nend repeat\nreturn o\nend tell");
+    out.split("||").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+}
+pub(crate) fn lib_index() -> (Vec<String>, Vec<String>, Vec<String>) {
+    INDEX.get().and_then(|m| m.lock().ok()).and_then(|g| g.clone()).unwrap_or_default()
+}
+pub(crate) fn library_page() -> Vec<crate::finder::Found> { filtered_page("library", "", 0) }
+pub(crate) fn filtered_page(kind: &str, name: &str, offset: usize) -> Vec<crate::finder::Found> {
+    // GetFilteredTracks idéntico a Go (página 30, con duración ignorada).
+    let (scope, pred) = match kind {
+        "playlist" => (format!("playlist \"{}\"", esc(name)), String::new()),
+        "artist" => ("playlist \"Library\"".to_string(), format!(" whose artist is \"{}\"", esc(name))),
+        "album" => ("playlist \"Library\"".to_string(), format!(" whose album is \"{}\"", esc(name))),
+        _ => ("playlist \"Library\"".to_string(), String::new()),
+    };
+    let s = format!("tell application \"Music\"\nset tl to (tracks of {}{})\nset o to \"\"\nset totalCount to count of tl\nset startIdx to {}\nset endIdx to {}\nif startIdx > totalCount then return \"\"\nif endIdx > totalCount then set endIdx to totalCount\nrepeat with i from startIdx to endIdx\nset t to item i of tl\nset o to o & name of t & \"||\" & artist of t & \"||\" & album of t & \"\\n\"\nend repeat\nreturn o\nend tell", scope, pred, offset + 1, offset + 30);
+    osa_out(&s).lines().filter_map(|l| {
+        let p: Vec<&str> = l.split("||").collect();
+        if p.is_empty() || p[0].trim().is_empty() { return None; }
+        Some(crate::finder::Found { name: p[0].trim().to_string(), artist: p.get(1).unwrap_or(&"").trim().to_string(), album: p.get(2).unwrap_or(&"").trim().to_string() })
+    }).collect()
+}
+pub(crate) fn context_tracks(kind: &str, name: &str) -> Vec<crate::finder::Found> {
+    let pred = match kind { "album" => format!("whose album is \"{}\"", esc(name)), "artist" => format!("whose artist is \"{}\"", esc(name)), _ => String::new() };
+    let scope = if kind == "playlist" { format!("playlist \"{}\"", esc(name)) } else { format!("playlist \"Library\" {}", pred) };
+    let s = format!("tell application \"Music\"\nset tl to tracks of {}\nset o to \"\"\nrepeat with i from 1 to (count of tl)\nif i > 50 then exit repeat\nset t to item i of tl\nset o to o & name of t & \"||\" & artist of t & \"||\" & album of t & \"\\n\"\nend repeat\nreturn o\nend tell", scope);
+    osa_out(&s).lines().filter_map(|l| {
+        let p: Vec<&str> = l.split("||").collect();
+        if p.is_empty() || p[0].trim().is_empty() { return None; }
+        Some(crate::finder::Found { name: p[0].trim().to_string(), artist: p.get(1).unwrap_or(&"").trim().to_string(), album: p.get(2).unwrap_or(&"").trim().to_string() })
+    }).collect()
+}
+pub(crate) fn play_in_context(kind: &str, name: &str, idx1: usize) {
+    let s = match kind {
+        "playlist" => format!("tell application \"Music\"\nset tl to tracks of playlist \"{}\"\nplay item {} of tl\nend tell", esc(name), idx1),
+        "album" => format!("tell application \"Music\"\nset tl to (tracks of playlist \"Library\" whose album is \"{}\")\nplay item {} of tl\nend tell", esc(name), idx1),
+        "artist" => format!("tell application \"Music\"\nset tl to (tracks of playlist \"Library\" whose artist is \"{}\")\nplay item {} of tl\nend tell", esc(name), idx1),
+        // Library no lleva filtro: antes caía incorrectamente en artist="".
+        _ => format!("tell application \"Music\"\nset tl to tracks of playlist \"Library\"\nplay item {} of tl\nend tell", idx1),
+    };
+    osa_control(&s);
+}
+pub(crate) fn add_to_playlist(f: &crate::finder::Found, playlist: &str) {
+    let s = format!("tell application \"Music\"\nset tl to (tracks of playlist \"Library\" whose name is \"{}\" and artist is \"{}\")\nif (count of tl) > 0 then duplicate item 1 of tl to playlist \"{}\"\nend tell", esc(&f.name), esc(&f.artist), esc(playlist));
+    osa_control(&s);
+}
+
+// PlayFirstLibraryMatch idéntico a Go: search en library playlist 1 y
+// play item 1. Sin match no toca Music (el tell con error no abre nada).
+fn play_first_match(q: &str) -> bool {
+    let s = format!("tell application \"Music\"\nset rs to (search (library playlist 1) for \"{}\")\nif (count of rs) is 0 then error \"NO_MATCH\"\nplay item 1 of rs\nend tell", esc(q));
+    Command::new("osascript").arg("-e").arg(&s).output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+pub(crate) fn play_library(f: &crate::finder::Found) {
+    // Igual que Go PlayTrackInLibrary: match exacto nombre+artista+álbum
+    // (el search por texto abría Music sin sonar cuando no matcheaba).
+    let s = format!("tell application \"Music\"\nset tl to (tracks of playlist \"Library\" whose name is \"{}\" and artist is \"{}\" and album is \"{}\")\nif (count of tl) = 0 then set tl to (tracks of playlist \"Library\" whose name is \"{}\")\nif (count of tl) > 0 then play item 1 of tl\nend tell", esc(&f.name), esc(&f.artist), esc(&f.album), esc(&f.name));
+    osa_control(&s);
+}
+
 // Poll reactivo sin osascript: `media-control get --no-artwork` no pide
 // permiso -1743 y es lo mismo que usa music-cli para el hero.

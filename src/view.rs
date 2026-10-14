@@ -4,7 +4,7 @@ pub(crate) const LYRIC_ROWS: usize = 9;
 use std::time::{Duration, Instant};
 
 use image::DynamicImage;
-use ratatui::style::Style;
+use ratatui::{layout::Rect, style::Style};
 
 use crate::state::Now;
 
@@ -124,6 +124,23 @@ pub(crate) fn progress_bar(pos: f64, dur: f64, width: usize) -> (String, String,
     (bar, left, right, gap as usize)
 }
 
+// Fit sin deformar: una celda mide aproximadamente el doble de alto que de ancho.
+pub(crate) fn cover_rect(area: Rect, img_w: u32, img_h: u32) -> Rect {
+    let (w, h) = (area.width as u64, area.height as u64);
+    let (iw, ih) = (img_w.max(1) as u64, img_h.max(1) as u64);
+    let (rw, rh) = if w * ih > h * 2 * iw {
+        ((h * 2 * iw / ih).max(1).min(w), h)
+    } else {
+        (w, (w * ih / (2 * iw)).max(1).min(h))
+    };
+    Rect::new(
+        area.x + ((w - rw) / 2) as u16,
+        area.y + ((h - rh) / 2) as u16,
+        rw as u16,
+        rh as u16,
+    )
+}
+
 pub(crate) fn cover_rows(term_h: usize) -> usize {
     if term_h == 0 {
         return 0;
@@ -207,6 +224,12 @@ mod tests {
         assert_eq!(zone_rows(15), 1);
         assert_eq!(zone_rows(30), 3);
         assert_eq!(zone_rows(60), LYRIC_ROWS);
+    }
+    #[test]
+    fn cover_fits_and_centers() {
+        assert_eq!(cover_rect(Rect::new(10, 2, 60, 20), 600, 600), Rect::new(20, 2, 40, 20));
+        assert_eq!(cover_rect(Rect::new(10, 2, 60, 30), 600, 600), Rect::new(10, 2, 60, 30));
+        assert_eq!(cover_rect(Rect::new(10, 2, 60, 20), 300, 600), Rect::new(30, 2, 20, 20));
     }
     #[test]
     fn show_cover_tiny() {
