@@ -1,5 +1,5 @@
 class Musik < Formula
-  desc "Apple Music TUI player (Rust port of music-cli)"
+  desc "Apple Music TUI player"
   homepage "https://github.com/palmachris7/musik"
   # Release tarballs: create a GitHub release (e.g. v0.1.0) and fill the hash:
   #   curl -sL <url> | shasum -a 256
