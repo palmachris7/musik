@@ -814,7 +814,10 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                         let st = if i == cursor { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) } else { Style::default() };
                         lines.push(Line::from(Span::styled(format!("  {}", r.label()), st)));
                     }
-                    if drill_tracks.is_empty() { lines.push(Line::from(Span::styled("  loading…", dim_style()))); }
+                    if drill_tracks.is_empty() {
+                        let msg = if drill_loading.is_empty() { "  empty" } else { "  loading…" };
+                        lines.push(Line::from(Span::styled(msg, dim_style())));
+                    }
                 } else if query.trim().is_empty() {
                     // Sin filtro: página de biblioteca (Go muestra tracks, no índice).
                     for (i, r) in lib_page.iter().skip(finder_offset).take(inner.height as usize).enumerate() {
@@ -822,6 +825,7 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                         let st = if gi == cursor { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) } else { Style::default() };
                         lines.push(Line::from(Span::styled(format!("  {}", r.label()), st)));
                     }
+                    if lib_done && !lib_page.is_empty() { lines.push(Line::from(Span::styled("  — end of library —", dim_style()))); }
                     if lines.is_empty() { lines.push(Line::from(Span::styled("  type to filter · Tab for Apple Music", dim_style()))); }
                 } else {
                     // index entries (◉ album ⚉ artist ☰ playlist) + page hits + tracks.
@@ -863,7 +867,13 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                         if n >= win1 { break; }
                         if let Some(l) = wrow!(format!("  {}", r.label())) { lines.push(l); }
                     }
-                    if lines.is_empty() { lines.push(Line::from(Span::styled("  Enter to search · Tab for Apple Music · + add", dim_style()))); }
+                    if lines.is_empty() {
+                        if !query.trim().is_empty() && searched == query {
+                            lines.push(Line::from(Span::styled(format!("  no results for '{}'", query), dim_style())));
+                        } else {
+                            lines.push(Line::from(Span::styled("  Enter to search · Tab for Apple Music · + add", dim_style())));
+                        }
+                    }
                 }
                 f.render_widget(Paragraph::new(lines), inner);
             }
