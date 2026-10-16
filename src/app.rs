@@ -1133,6 +1133,7 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                     }
                 }
                 Event::Key(k) => {
+                dlog!("KEY {:?}", k.code);
                 if menu_open {
                     match k.code {
                         KeyCode::Esc | KeyCode::Char('m') | KeyCode::Char('q') => { menu_open = false; menu_help = false; continue; }
@@ -1168,6 +1169,25 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                     continue;
                 }
                 if finder_open {
+                    // Visible row count of the current finder view (mirrors render).
+                    let finder_n = || -> usize {
+                        if scope == "catalog" { if cat_drill { cat_tracks.len() } else { cat_albums.len() + cat_songs.len() } }
+                        else if add_mode { lib_index().2.len() }
+                        else if drilled.is_some() { drill_tracks.len() }
+                        else if query.trim().is_empty() { lib_page.len() }
+                        else { let ql = query.to_lowercase(); let (a, r, p) = lib_index();
+                            let mut ne = 0;
+                            for s in a.iter().filter(|s| ql.is_empty() || s.to_lowercase().contains(&ql)) { if ne >= 12 { break; } ne += 1; let _ = s; }
+                            for s in r.iter().filter(|s| ql.is_empty() || s.to_lowercase().contains(&ql)) { if ne >= 12 { break; } ne += 1; let _ = s; }
+                            for s in p.iter().filter(|s| ql.is_empty() || s.to_lowercase().contains(&ql)) { if ne >= 12 { break; } ne += 1; let _ = s; }
+                            ne + page_hits.len() + results.len() }
+                    };
+                    // Filas visibles del overlay (igual que el render: inner del bloque).
+                    let finder_vh = || -> usize {
+                        let top = title_r.y;
+                        let h2 = frame_rect.height.saturating_sub(top.saturating_sub(frame_rect.y)).max(6);
+                        (h2.saturating_sub(2) as usize).max(1)
+                    };
                     match k.code {
                         KeyCode::Char('/') => {
                             finder_open = false; query.clear(); results.clear(); searched.clear();
@@ -1291,18 +1311,20 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                             if cursor < finder_offset { finder_offset = cursor; }
                             continue;
                         }
+                        KeyCode::Home => { filter_on = false; cursor = 0; finder_offset = 0; continue; }
+                        KeyCode::End => {
+                            filter_on = false;
+                            let n = finder_n();
+                            if n > 0 {
+                                cursor = n - 1;
+                                let visible = finder_vh();
+                                finder_offset = cursor.saturating_sub(visible - 1);
+                            }
+                            continue;
+                        }
                         KeyCode::Down => {
                             filter_on = false; // ↑/↓ pasan a navegar (Go blurea el filtro)
-                            let mut n = if scope == "catalog" { if cat_drill { cat_tracks.len() } else { cat_albums.len() + cat_songs.len() } }
-                                else if add_mode { lib_index().2.len() }
-                                else if drilled.is_some() { drill_tracks.len() }
-                                else if query.trim().is_empty() { lib_page.len() }
-                                else { let ql = query.to_lowercase(); let (a, r, p) = lib_index();
-                                    let mut ne = 0;
-                                    for s in a.iter().filter(|s| ql.is_empty() || s.to_lowercase().contains(&ql)) { if ne >= 12 { break; } ne += 1; let _ = s; }
-                                    for s in r.iter().filter(|s| ql.is_empty() || s.to_lowercase().contains(&ql)) { if ne >= 12 { break; } ne += 1; let _ = s; }
-                                    for s in p.iter().filter(|s| ql.is_empty() || s.to_lowercase().contains(&ql)) { if ne >= 12 { break; } ne += 1; let _ = s; }
-                                    ne + page_hits.len() + results.len() };
+                            let mut n = finder_n();
                             // Catálogo: siguiente página de Apple Music al acercarse al final.
                             if scope == "catalog" && !cat_drill && cat_more && !cat_worker.loading
                                 && cursor + 5 >= cat_albums.len() + cat_songs.len() {
@@ -1317,7 +1339,7 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                             }
                             if cursor + 1 < n {
                                 cursor += 1;
-                                let visible = 10usize;
+                                let visible = finder_vh();
                                 if cursor >= finder_offset + visible { finder_offset = cursor + 1 - visible; }
                             }
                             continue;
@@ -1361,9 +1383,10 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                 match k.code {
                     KeyCode::Char('/') => {
                         // Open finder.
+                        dlog!("OPEN finder, lib_page={}", lib_page.len());
                         finder_open = true; query.clear(); results.clear(); searched.clear(); cursor = 0; finder_offset = 0;
                         filter_on = true; drilled = None; drill_tracks.clear();
-                        if lib_page.is_empty() { lib_page = library_page(); lib_done = lib_page.len() < 30; }
+                        if lib_page.is_empty() { lib_page = library_page(); lib_done = lib_page.len() < 30; dlog!("lib_page loaded={} done={}", lib_page.len(), lib_done); }
                         continue;
                     }
                     KeyCode::Char('q') | KeyCode::Esc => break,
