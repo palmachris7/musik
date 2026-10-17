@@ -221,22 +221,22 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
         // muerto KeyCode::Null lo conserva como referencia.)
         if std::mem::take(&mut fire_enter) && finder_open {
             if scope == "catalog" {
-                let nalb = cat_albums.len();
+                let nsong = cat_songs.len();
                 if cat_drill {
                     if let Some(s) = cat_tracks.get(cursor) {
                         play_catalog_song(s);
                         finder_open = false; query.clear(); cat_songs.clear(); cat_albums.clear(); cat_tracks.clear(); cat_drill = false; cursor = 0;
                     }
-                } else if cursor < nalb {
-                    let id = cat_albums.get(cursor).map(|a| a.id.clone()).unwrap_or_default();
+                } else if let Some(s) = cat_songs.get(cursor) {
+                    play_catalog_song(s);
+                    finder_open = false; query.clear(); cat_songs.clear(); cat_albums.clear(); cursor = 0;
+                } else if let Some(a) = cat_albums.get(cursor - nsong) {
+                    let id = a.id.clone();
                     if !id.is_empty() {
                         cat_tracks.clear(); cat_err.clear();
                         cat_worker.tracks(&id);
                         cat_drill = true; cursor = 0; finder_offset = 0;
                     }
-                } else if let Some(s) = cat_songs.get(cursor - nalb) {
-                    play_catalog_song(s);
-                    finder_open = false; query.clear(); cat_songs.clear(); cat_albums.clear(); cursor = 0;
                 } else if !query.is_empty() && searched != query {
                     cat_songs.clear(); cat_albums.clear(); cat_drill = false; cat_err.clear();
                     cat_query = query.clone(); cat_more = false;
@@ -782,12 +782,19 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                             lines.push(Line::from(Span::styled(format!("  {}", t.title), st)));
                         }
                     } else {
-                        // Ventana de scroll [finder_offset, +max) sobre albums+songs.
-                        // Antes se dibujaba siempre desde 0: el cursor bajaba y las
-                        // canciones quedaban inalcanzables ("no encuentra").
+                        // Ventana de scroll [finder_offset, +max) sobre canciones+álbumes.
+                        // Canciones primero: al buscar un tema, Apple devuelve muchos
+                        // discos homónimos que antes enterraban la canción ("Textos").
                         let max = inner.height as usize;
                         let win1 = finder_offset + max;
                         let mut n = 0;
+                        for s in cat_songs.iter() {
+                            if n >= win1 { break; }
+                            let gi = n; n += 1;
+                            if gi < finder_offset { continue; }
+                            let st = if gi == cursor { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) } else { Style::default() };
+                            lines.push(Line::from(Span::styled(format!("  {} — {}", s.title, s.artist), st)));
+                        }
                         for a in cat_albums.iter() {
                             if n >= win1 { break; }
                             let gi = n; n += 1;
@@ -795,13 +802,6 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                             let st = if gi == cursor { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) } else { Style::default() };
                             let y = if a.year.is_empty() { String::new() } else { format!("  {}", a.year) };
                             lines.push(Line::from(Span::styled(format!("  ◉ {} — {}{}", a.title, a.artist, y), st)));
-                        }
-                        for s in cat_songs.iter() {
-                            if n >= win1 { break; }
-                            let gi = n; n += 1;
-                            if gi < finder_offset { continue; }
-                            let st = if gi == cursor { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) } else { Style::default() };
-                            lines.push(Line::from(Span::styled(format!("  {} — {}", s.title, s.artist), st)));
                         }
                         if cat_worker.loading { lines.push(Line::from(Span::styled("  loading…", dim_style()))); }
                     }
@@ -1236,22 +1236,22 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                         }
                         KeyCode::Null if false => {
                             if scope == "catalog" {
-                                let nalb = cat_albums.len();
+                                let nsong = cat_songs.len();
                                 if cat_drill {
                                     if let Some(s) = cat_tracks.get(cursor) {
                                         play_catalog_song(s);
                                         finder_open = false; query.clear(); cat_songs.clear(); cat_albums.clear(); cat_tracks.clear(); cat_drill = false; cursor = 0;
                                     }
-                                } else if cursor < nalb {
-                                    let id = cat_albums.get(cursor).map(|a| a.id.clone()).unwrap_or_default();
+                                } else if let Some(s) = cat_songs.get(cursor) {
+                                    play_catalog_song(s);
+                                    finder_open = false; query.clear(); cat_songs.clear(); cat_albums.clear(); cursor = 0;
+                                } else if let Some(a) = cat_albums.get(cursor - nsong) {
+                                    let id = a.id.clone();
                                     if !id.is_empty() {
                                         cat_tracks.clear(); cat_err.clear();
                                         cat_worker.tracks(&id);
                                         cat_drill = true; cursor = 0; finder_offset = 0;
                                     }
-                                } else if let Some(s) = cat_songs.get(cursor - nalb) {
-                                    play_catalog_song(s);
-                                    finder_open = false; query.clear(); cat_songs.clear(); cat_albums.clear(); cursor = 0;
                                 } else if !query.is_empty() && searched != query {
                                     cat_songs.clear(); cat_albums.clear(); cat_drill = false; cat_err.clear();
                                     cat_query = query.clone(); cat_more = false;
