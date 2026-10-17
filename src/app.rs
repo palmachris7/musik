@@ -183,6 +183,7 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
         "up/down navigate", "enter play", "wheel scroll", "c cover",
     ];
     kick_index();
+    kick_tracks();
 
     // Estado inicial instantáneo (el stream solo manda diffs al cambiar algo).
     if let Some(mut fresh) = fetch_now() {
@@ -210,7 +211,8 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
             vec![]
         } else {
             let ql = query.to_lowercase();
-            lib_page.iter().enumerate().filter(|(_, r)| {
+            let tindex = crate::media::track_index();
+            tindex.iter().enumerate().filter(|(_, r)| {
                 r.name.to_lowercase().contains(&ql)
                     || r.artist.to_lowercase().contains(&ql)
                     || r.album.to_lowercase().contains(&ql)
@@ -246,9 +248,9 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
             } else if add_mode {
                 let (_, _, pls) = lib_index();
                 // track_idx cuenta page hits primero, luego resultados (igual que el render).
-                let f = page_hits.get(track_idx).and_then(|&i| lib_page.get(i))
-                    .or_else(|| results.get(track_idx.saturating_sub(page_hits.len())));
-                if let (Some(pl), Some(f)) = (pls.get(cursor), f) { add_to_playlist(f, pl); }
+                let f = page_hits.get(track_idx).and_then(|&i| crate::media::track_index().get(i).cloned())
+                    .or_else(|| results.get(track_idx.saturating_sub(page_hits.len())).cloned());
+                if let (Some(pl), Some(f)) = (pls.get(cursor), f.as_ref()) { add_to_playlist(f, pl); }
                 add_mode = false; cursor = 0;
             } else if let Some((kind, name)) = drilled.clone() {
                 if filter_on {
@@ -840,6 +842,7 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                     // Ventana de scroll [finder_offset, finder_offset+max), cursor global.
                     let ql = query.to_lowercase();
                     let (albums, artists, pls) = lib_index();
+                    let tindex = crate::media::track_index();
                     let mut n = 0;
                     let max = inner.height as usize;
                     let win1 = finder_offset + max;
@@ -867,7 +870,7 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                     }
                     for &i in page_hits.iter() {
                         if n >= win1 { break; }
-                        if let Some(r) = lib_page.get(i) {
+                        if let Some(r) = tindex.get(i) {
                             if let Some(l) = wrow!(format!("  {}", r.label())) { lines.push(l); }
                         }
                     }

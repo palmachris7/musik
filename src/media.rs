@@ -505,6 +505,26 @@ fn osa_playlists() -> Vec<String> {
 pub(crate) fn lib_index() -> (Vec<String>, Vec<String>, Vec<String>) {
     INDEX.get().and_then(|m| m.lock().ok()).and_then(|g| g.clone()).unwrap_or_default()
 }
+// Índice completo de canciones de Library: permite filtrar por canción
+// al teclear sin osascript por tecla. Orden = tracks of playlist "Library",
+// así el índice coincide con el 1-based de play_in_context("library").
+static TRACKS: std::sync::OnceLock<std::sync::Mutex<Option<Vec<crate::finder::Found>>>> = std::sync::OnceLock::new();
+pub(crate) fn kick_tracks() {
+    let m = TRACKS.get_or_init(|| std::sync::Mutex::new(None));
+    if m.lock().ok().and_then(|g| g.clone()).is_some() { return; }
+    std::thread::spawn(|| {
+        let s = "tell application \"Music\"\nset tl to (tracks of playlist \"Library\")\nset o to \"\"\nrepeat with t in tl\nset o to o & name of t & \"||\" & artist of t & \"||\" & album of t & \"\\n\"\nend repeat\nreturn o\nend tell";
+        let all: Vec<crate::finder::Found> = osa_out(s).lines().filter_map(|l| {
+            let p: Vec<&str> = l.split("||").collect();
+            if p.is_empty() || p[0].trim().is_empty() { return None; }
+            Some(crate::finder::Found { name: p[0].trim().to_string(), artist: p.get(1).unwrap_or(&"").trim().to_string(), album: p.get(2).unwrap_or(&"").trim().to_string() })
+        }).collect();
+        if let Some(m) = TRACKS.get() { *m.lock().unwrap() = Some(all); }
+    });
+}
+pub(crate) fn track_index() -> Vec<crate::finder::Found> {
+    TRACKS.get().and_then(|m| m.lock().ok()).and_then(|g| g.clone()).unwrap_or_default()
+}
 pub(crate) fn library_page() -> Vec<crate::finder::Found> { filtered_page("library", "", 0) }
 pub(crate) fn filtered_page(kind: &str, name: &str, offset: usize) -> Vec<crate::finder::Found> {
     // GetFilteredTracks idéntico a Go (página 30, con duración ignorada).
