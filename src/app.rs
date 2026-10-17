@@ -64,6 +64,7 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
     // Canales background (nada bloquea el hilo UI, igual que Go tea.Cmd).
     let (bg_tx, bg_rx) = mpsc::channel::<BgMsg>();
     spawn_stream(bg_tx.clone());
+    spawn_music_watch(bg_tx.clone()); // reactivo Music fino + podcast genérico via stream
     let (art_tx, art_rx) = mpsc::channel::<ArtJob>();
     spawn_cover_worker(art_rx, bg_tx.clone());
 
@@ -781,19 +782,26 @@ pub(crate) fn run(cover_mode: CoverMode, hidpi: f64) -> io::Result<()> {
                             lines.push(Line::from(Span::styled(format!("  {}", t.title), st)));
                         }
                     } else {
+                        // Ventana de scroll [finder_offset, +max) sobre albums+songs.
+                        // Antes se dibujaba siempre desde 0: el cursor bajaba y las
+                        // canciones quedaban inalcanzables ("no encuentra").
+                        let max = inner.height as usize;
+                        let win1 = finder_offset + max;
                         let mut n = 0;
-                        for (i, a) in cat_albums.iter().enumerate() {
-                            if n >= inner.height as usize { break; }
-                            let st = if n == cursor { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) } else { Style::default() };
+                        for a in cat_albums.iter() {
+                            if n >= win1 { break; }
+                            let gi = n; n += 1;
+                            if gi < finder_offset { continue; }
+                            let st = if gi == cursor { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) } else { Style::default() };
                             let y = if a.year.is_empty() { String::new() } else { format!("  {}", a.year) };
                             lines.push(Line::from(Span::styled(format!("  ◉ {} — {}{}", a.title, a.artist, y), st)));
-                            let _ = i; n += 1;
                         }
                         for s in cat_songs.iter() {
-                            if n >= inner.height as usize { break; }
-                            let st = if n == cursor { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) } else { Style::default() };
+                            if n >= win1 { break; }
+                            let gi = n; n += 1;
+                            if gi < finder_offset { continue; }
+                            let st = if gi == cursor { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) } else { Style::default() };
                             lines.push(Line::from(Span::styled(format!("  {} — {}", s.title, s.artist), st)));
-                            n += 1;
                         }
                         if cat_worker.loading { lines.push(Line::from(Span::styled("  loading…", dim_style()))); }
                     }

@@ -123,38 +123,43 @@ pub(crate) fn get_str(v: &serde_json::Value, k: &str) -> String {
 
 // ---- carátula idéntica a Go (cover.go): media-control artworkData -> tmp jpg -> chafa ----
 
+fn music_now_from_osa() -> Option<Now> {
+    // Fuente fina Music: bundle Music perdido? lee directo de la app.
+    let out = Command::new("osascript").args(["-e", "tell application \"Music\" to (name of current track as string) & \"||\" & (artist of current track as string) & \"||\" & (album of current track as string) & \"||\" & (player state as string) & \"||\" & (player position as string) & \"||\" & (duration of current track as string)"]).output().ok()?;
+    if !out.status.success() { return None; }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let p: Vec<&str> = s.split("||").collect();
+    if p.len() < 6 || p[0].is_empty() { return None; }
+    let playing = p[3].trim() == "playing";
+    Some(Now {
+        title: p[0].to_string(), artist: p[1].to_string(), album: p[2].to_string(),
+        duration: p[5].parse().unwrap_or(0.0), elapsed: p[4].parse().unwrap_or(0.0),
+        at: Some(Instant::now()), playing, shuffle: false, repeat: "off".to_string(),
+        fav: false, track_since: None, src: "music".to_string(),
+    })
+}
+
 pub(crate) fn fetch_now() -> Option<Now> {
+    if let Some(n) = fetch_now_mc() {
+        return Some(n);
+    }
+    music_now_from_osa()
+}
+fn fetch_now_mc() -> Option<Now> {
     let out = mc(&["get", "--no-artwork"])?;
-    if out.is_empty() {
-        return None;
-    }
+    if out.is_empty() { return None; }
     let v: serde_json::Value = serde_json::from_str(&out).ok()?;
-    // Solo Music en fase 1 (podcasts en fase 2, igual que Go srcOf).
     let bundle = get_str(&v, "bundleIdentifier");
-    if bundle != "com.apple.Music" {
-        return None;
-    }
+    if bundle != "com.apple.Music" { return None; }
     let title = get_str(&v, "title");
-    if title.is_empty() {
-        return None;
-    }
+    if title.is_empty() { return None; }
     let playing = v.get("playing").and_then(|x| x.as_bool()).unwrap_or(false);
     let duration = v.get("duration").and_then(|x| x.as_f64()).unwrap_or(0.0);
-    // elapsedTime viene anclado a timestamp; extrapolamos como Go position().
     let elapsed = v.get("elapsedTime").and_then(|x| x.as_f64()).unwrap_or(0.0);
     Some(Now {
-        title,
-        artist: get_str(&v, "artist"),
-        album: get_str(&v, "album"),
-        duration,
-        elapsed,
-        at: Some(Instant::now()),
-        playing,
-        shuffle: false, // fase 1: no bloqueamos por esto
-        repeat: "off".to_string(),
-        fav: false,
-        track_since: None, // lo fija el caller al detectar cambio de track
-        src: "music".to_string(), // fetch_now solo acepta com.apple.Music
+        title, artist: get_str(&v, "artist"), album: get_str(&v, "album"),
+        duration, elapsed, at: Some(Instant::now()), playing,
+        shuffle: false, repeat: "off".to_string(), fav: false, track_since: None, src: "music".to_string(),
     })
 }
 
@@ -252,6 +257,49 @@ pub(crate) fn merge_update(n: &mut Now, u: &StreamUpdate, at: Instant) -> bool {
 
 // Hilo stream: `media-control stream` línea a línea (igual que Go subscribeStream).
 // Reintenta solo si muere; avisa Alive/Dead para el fallback de polling.
+
+pub(crate) fn spawn_music_watch(tx: Sender<BgMsg>) {
+    // Push reactivo Music: mismo nowplaying-watch de sketchybar (Music.playerInfo).
+    // Al disparar, lee fino via osascript Music; si no hay nada, cae al fallback Update.
+    // La propia emisión inicial de emit() ya pinta el hero al arrancar.
+    let watch = format!("{}/.config/dotfiles/sketchybar/bin/nowplaying-watch", std::env::var("HOME").unwrap_or_default());
+    let tx2 = tx.clone();
+    thread::spawn(move || {
+        let mut child = match Command::new(&watch).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+            Ok(c) => c,
+            Err(_) => { // bin no compilado aún: compílalo inline
+                let src = format!("{}/.config/dotfiles/sketchybar/bin/nowplaying-watch.swift", std::env::var("HOME").unwrap_or_default());
+                let _ = Command::new("swiftc").args(["-O", &src, "-o", &watch]).output();
+                match Command::new(&watch).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+                    Ok(c) => c, Err(_) => return,
+                }
+            }
+        };
+        let out = match child.stdout.take() { Some(o) => o, None => return };
+        for _ in BufReader::new(out).lines() {
+            // Cada línea es "change": lee fino Music; si vacía, el stream genérico cubrirá podcasts.
+            let mut tried_osa = false;
+            if let Some(n) = music_now_from_osa() {
+                tried_osa = true;
+                let _ = tx2.send(BgMsg::Update(StreamUpdate {
+                    title: Some(n.title), artist: Some(n.artist), album: Some(n.album),
+                    duration: Some(n.duration), elapsed: Some(n.elapsed), playing: Some(n.playing),
+                    artwork: None, src: "music".to_string(),
+                }));
+            }
+            if !tried_osa {
+                if let Some(n) = fetch_now_mc() {
+                    let _ = tx2.send(BgMsg::Update(StreamUpdate {
+                        title: Some(n.title), artist: Some(n.artist), album: Some(n.album),
+                        duration: Some(n.duration), elapsed: Some(n.elapsed), playing: Some(n.playing),
+                        artwork: None, src: n.src,
+                    }));
+                }
+            }
+            dlog!("music-watch change");
+        }
+    });
+}
 
 pub(crate) fn spawn_stream(tx: Sender<BgMsg>) {
     thread::spawn(move || {
